@@ -4,34 +4,45 @@ geotab.addin.fuelMonitor = function (outerApi, outerState) {
     let chartInstance = null;
     let reportDataForExport = [];
 
-    const modeRadios   = document.getElementsByName('searchMode');
-    const entitySelect = document.getElementById('entitySelect');
-    const dateFrom     = document.getElementById('dateFrom');
-    const dateTo       = document.getElementById('dateTo');
-    const btnFetch     = document.getElementById('btn-fetch-data');
-    const btnExport    = document.getElementById('btn-export-excel');
-    const panel        = document.getElementById('results-panel');
-    const chartWrap    = document.getElementById('chartWrapper');
+    const modeRadios     = document.getElementsByName('searchMode');
+    const entitySelect   = document.getElementById('entitySelect');
+    const dateFrom       = document.getElementById('dateFrom');
+    const dateTo         = document.getElementById('dateTo');
+    const thresholdInput = document.getElementById('thresholdLimit');
+    const btnFetch       = document.getElementById('btn-fetch-data');
+    const btnExport      = document.getElementById('btn-export-excel');
+    const panel          = document.getElementById('results-panel');
+    const chartWrap      = document.getElementById('chartWrapper');
 
-    // Helper para nombre y apellidos del conductor
+    // Extraer Nombre y Apellidos
     function getDriverDisplayName(user) {
         if (!user) return "Conductor Desconocido";
-        
         let fullName = "";
         if (user.firstName || user.lastName) {
             fullName = `${user.firstName || ''} ${user.lastName || ''}`.trim();
         }
-        
         if (!fullName) {
             fullName = user.name || user.id || "Sin Nombre";
         }
-
-        // Limpiar identificadores tipo clave interna si existen como fallback único
         if (fullName.startsWith("#E_")) {
             fullName = user.name || "Conductor " + user.id;
         }
-
         return fullName;
+    }
+
+    // Badge HTML generado con CSS Inline
+    function getConsumptionBadge(avg, threshold) {
+        if (avg <= 0 || isNaN(avg)) {
+            return `<span style="font-weight:600; color:#64748b;">N/D</span>`;
+        }
+        const isHigh = avg > threshold;
+        const bg = isHigh ? '#fef2f2' : '#f0fdf4';
+        const color = isHigh ? '#dc2626' : '#16a34a';
+        const border = isHigh ? '#fca5a5' : '#86efac';
+
+        return `<span style="background-color: ${bg}; color: ${color}; border: 1px solid ${border}; padding: 3px 8px; border-radius: 4px; font-weight: 700; font-size: 12px; display: inline-block;">
+            ${avg.toFixed(2)} L/100km
+        </span>`;
     }
 
     function directCall(method, params, successCallback, errorCallback) {
@@ -103,40 +114,41 @@ geotab.addin.fuelMonitor = function (outerApi, outerState) {
 
     function loadReport() {
         if (!dateFrom.value || !dateTo.value) {
-            panel.innerHTML = '<div class="card-result" style="color:#b91c1c;">Por favor selecciona las fechas "Desde" y "Hasta".</div>';
+            panel.innerHTML = '<div style="background:#ffffff; border:1px solid #dce2e6; padding:16px; border-radius:6px; color:#b91c1c;">Por favor selecciona las fechas "Desde" y "Hasta".</div>';
             return;
         }
 
         const mode = document.querySelector('input[name="searchMode"]:checked').value;
         const selectedId = entitySelect.value;
+        const threshold = parseFloat(thresholdInput.value) || 30.0;
         const fromDate = new Date(dateFrom.value + "T00:00:00Z").toISOString();
         const toDate = new Date(dateTo.value + "T23:59:59Z").toISOString();
 
-        panel.innerHTML = '<div class="card-result"><p>⏳ Obteniendo y procesando telemetría... Por favor espera.</p></div>';
+        panel.innerHTML = '<div style="background:#ffffff; border:1px solid #dce2e6; padding:16px; border-radius:6px;"><p style="margin:0;">⏳ Procesando datos de telemetría... Por favor espera.</p></div>';
         btnExport.style.display = 'none';
         chartWrap.style.display = 'none';
         reportDataForExport = [];
 
         if (mode === 'Device') {
             if (selectedId === 'ALL') {
-                processAllVehicles(fromDate, toDate);
+                processAllVehicles(fromDate, toDate, threshold);
             } else {
-                processSingleVehicle(selectedId, entitySelect.options[entitySelect.selectedIndex].text, fromDate, toDate);
+                processSingleVehicle(selectedId, entitySelect.options[entitySelect.selectedIndex].text, fromDate, toDate, threshold);
             }
         } else {
             if (selectedId === 'ALL') {
-                processAllDrivers(fromDate, toDate);
+                processAllDrivers(fromDate, toDate, threshold);
             } else {
-                processSingleDriver(selectedId, entitySelect.options[entitySelect.selectedIndex].text, fromDate, toDate);
+                processSingleDriver(selectedId, entitySelect.options[entitySelect.selectedIndex].text, fromDate, toDate, threshold);
             }
         }
     }
 
     // ─── PROCESO: VEHÍCULOS ───────────────────────────────────────────────────
-    function processAllVehicles(fromDate, toDate) {
+    function processAllVehicles(fromDate, toDate, threshold) {
         directCall('Get', { typeName: 'Device' }, function(devices) {
             if (!devices || devices.length === 0) {
-                panel.innerHTML = '<div class="card-result"><p>No se encontraron vehículos en el sistema.</p></div>';
+                panel.innerHTML = '<div style="background:#ffffff; border:1px solid #dce2e6; padding:16px; border-radius:6px;"><p style="margin:0;">No se encontraron vehículos.</p></div>';
                 return;
             }
 
@@ -154,9 +166,9 @@ geotab.addin.fuelMonitor = function (outerApi, outerState) {
 
             directMultiCall(calls, function(results) {
                 let tableHtml = `
-                    <div class="card-result">
-                        <h3>Resumen Global de Vehículos</h3>
-                        <table>
+                    <div style="background: #ffffff; border: 1px solid #dce2e6; border-radius: 6px; padding: 16px; margin-top: 16px;">
+                        <h3 style="margin: 0 0 12px 0; font-size: 15px; color: #2b537d;">Resumen Global de Vehículos</h3>
+                        <table class="fuel-table">
                             <thead>
                                 <tr>
                                     <th>Vehículo</th>
@@ -173,9 +185,7 @@ geotab.addin.fuelMonitor = function (outerApi, outerState) {
                     const odoData = results[index * 2] || [];
                     const fuelData = results[index * 2 + 1] || [];
 
-                    let distanceKm = 0;
-                    let fuelLiters = 0;
-                    let avg = 0;
+                    let distanceKm = 0, fuelLiters = 0, avg = 0;
 
                     if (odoData.length >= 2) {
                         distanceKm = (odoData[odoData.length - 1].data - odoData[0].data) / 1000;
@@ -189,13 +199,12 @@ geotab.addin.fuelMonitor = function (outerApi, outerState) {
                     }
 
                     if (distanceKm > 0 || fuelLiters > 0) {
-                        const badgeClass = avg > 35 ? 'badge-high' : 'badge-good';
                         tableHtml += `
                             <tr>
                                 <td><strong>${dev.name}</strong></td>
                                 <td>${distanceKm.toFixed(2)} km</td>
                                 <td>${fuelLiters.toFixed(2)} L</td>
-                                <td><span class="badge-avg ${badgeClass}">${avg > 0 ? avg.toFixed(2) + ' L/100km' : 'N/D'}</span></td>
+                                <td>${getConsumptionBadge(avg, threshold)}</td>
                             </tr>`;
 
                         reportDataForExport.push({
@@ -221,17 +230,13 @@ geotab.addin.fuelMonitor = function (outerApi, outerState) {
                         renderBarChart(chartLabels, chartData, 'Consumo Medio (L/100km)');
                     }
                 } else {
-                    panel.innerHTML = '<div class="card-result"><p>No se encontraron datos de consumo u odómetro en el periodo seleccionado.</p></div>';
+                    panel.innerHTML = '<div style="background:#ffffff; border:1px solid #dce2e6; padding:16px; border-radius:6px;"><p style="margin:0;">No se encontraron registros de consumo en las fechas seleccionadas.</p></div>';
                 }
-
-            }, function(err) {
-                console.error('Error MultiCall:', err);
-                panel.innerHTML = '<div class="card-result" style="color:#b91c1c;"><p>Error de conexión al obtener telemetría de vehículos.</p></div>';
             });
         });
     }
 
-    function processSingleVehicle(deviceId, deviceName, fromDate, toDate) {
+    function processSingleVehicle(deviceId, deviceName, fromDate, toDate, threshold) {
         var calls = [
             ['Get', { typeName: 'StatusData', search: { deviceSearch: { id: deviceId }, diagnosticSearch: { id: 'DiagnosticOdometerAdjustmentId' }, fromDate: fromDate, toDate: toDate } }],
             ['Get', { typeName: 'StatusData', search: { deviceSearch: { id: deviceId }, diagnosticSearch: { id: 'DiagnosticTotalFuelUsedId' }, fromDate: fromDate, toDate: toDate } }]
@@ -242,7 +247,7 @@ geotab.addin.fuelMonitor = function (outerApi, outerState) {
             const fuelData = results[1] || [];
 
             if (!odoData.length || !fuelData.length) {
-                panel.innerHTML = '<div class="card-result"><p>No hay suficientes datos registrados para este vehículo en el rango de fechas seleccionadas.</p></div>';
+                panel.innerHTML = '<div style="background:#ffffff; border:1px solid #dce2e6; padding:16px; border-radius:6px;"><p style="margin:0;">No hay suficientes datos registrados para este vehículo.</p></div>';
                 return;
             }
 
@@ -251,12 +256,12 @@ geotab.addin.fuelMonitor = function (outerApi, outerState) {
             const avg = distanceKm > 0 ? (fuelLiters / distanceKm) * 100 : 0;
 
             panel.innerHTML = `
-                <div class="card-result">
-                    <h3>Vehículo: ${deviceName}</h3>
-                    <div style="display: flex; gap: 40px; margin-top: 10px;">
-                        <div><span style="font-size:12px; color:#5a6a75; font-weight:700; text-transform:uppercase;">Distancia Recorrida</span><br><strong style="font-size:18px;">${distanceKm.toFixed(2)} km</strong></div>
-                        <div><span style="font-size:12px; color:#5a6a75; font-weight:700; text-transform:uppercase;">Combustible Consumido</span><br><strong style="font-size:18px;">${fuelLiters.toFixed(2)} Litros</strong></div>
-                        <div><span style="font-size:12px; color:#5a6a75; font-weight:700; text-transform:uppercase;">Consumo Medio</span><br><strong style="font-size:18px; color:${avg > 35 ? '#b91c1c' : '#15803d'};">${avg.toFixed(2)} L/100km</strong></div>
+                <div style="background:#ffffff; border:1px solid #dce2e6; border-radius:6px; padding:16px; margin-top:16px;">
+                    <h3 style="margin:0 0 12px 0; color:#2b537d;">Vehículo: ${deviceName}</h3>
+                    <div style="display: flex; gap: 30px; margin-top: 10px;">
+                        <div><span style="font-size:11px; color:#5a6a75; font-weight:700; text-transform:uppercase;">Distancia Recorrida</span><br><strong style="font-size:16px;">${distanceKm.toFixed(2)} km</strong></div>
+                        <div><span style="font-size:11px; color:#5a6a75; font-weight:700; text-transform:uppercase;">Combustible Consumido</span><br><strong style="font-size:16px;">${fuelLiters.toFixed(2)} Litros</strong></div>
+                        <div><span style="font-size:11px; color:#5a6a75; font-weight:700; text-transform:uppercase;">Consumo Medio</span><br>${getConsumptionBadge(avg, threshold)}</div>
                     </div>
                 </div>`;
 
@@ -272,13 +277,13 @@ geotab.addin.fuelMonitor = function (outerApi, outerState) {
         });
     }
 
-    // ─── PROCESO: CONDUCTORES (Con Litros y Consumo Medio) ─────────────────────
-    function processAllDrivers(fromDate, toDate) {
+    // ─── PROCESO: CONDUCTORES ─────────────────────────────────────────────────
+    function processAllDrivers(fromDate, toDate, threshold) {
         directCall('Get', { typeName: 'User', search: { isDriver: true } }, function(drivers) {
             directCall('Get', { typeName: 'Trip', search: { fromDate: fromDate, toDate: toDate } }, function(trips) {
 
                 if (!trips || trips.length === 0) {
-                    panel.innerHTML = '<div class="card-result"><p>No hay trayectos registrados en el periodo seleccionado.</p></div>';
+                    panel.innerHTML = '<div style="background:#ffffff; border:1px solid #dce2e6; padding:16px; border-radius:6px;"><p style="margin:0;">No hay trayectos registrados en el periodo seleccionado.</p></div>';
                     return;
                 }
 
@@ -292,27 +297,22 @@ geotab.addin.fuelMonitor = function (outerApi, outerState) {
                     };
                 });
 
-                // Agrupar viajes y dispositivos por conductor
                 trips.forEach(t => {
                     var driverId = t.driver ? t.driver.id : null;
                     if (driverId && driverMap[driverId]) {
                         driverMap[driverId].distance += (t.distance || 0);
                         driverMap[driverId].tripsCount++;
-                        if (t.device && t.device.id) {
-                            driverMap[driverId].devicesUsed.add(t.device.id);
-                        }
+                        if (t.device && t.device.id) driverMap[driverId].devicesUsed.add(t.device.id);
                     }
                 });
 
-                // Extraer dispositivos únicos implicados
                 const uniqueDeviceIds = Array.from(new Set(trips.map(t => t.device ? t.device.id : null).filter(Boolean)));
 
                 if (uniqueDeviceIds.length === 0) {
-                    panel.innerHTML = '<div class="card-result"><p>No se encontraron datos de vehículos asociados a los conductores.</p></div>';
+                    panel.innerHTML = '<div style="background:#ffffff; border:1px solid #dce2e6; padding:16px; border-radius:6px;"><p style="margin:0;">No se encontraron vehículos asociados a los conductores.</p></div>';
                     return;
                 }
 
-                // Consultar telemetría de combustible de los vehículos asociados
                 var fuelCalls = uniqueDeviceIds.map(devId => ['Get', {
                     typeName: 'StatusData',
                     search: { deviceSearch: { id: devId }, diagnosticSearch: { id: 'DiagnosticTotalFuelUsedId' }, fromDate: fromDate, toDate: toDate }
@@ -320,11 +320,8 @@ geotab.addin.fuelMonitor = function (outerApi, outerState) {
 
                 directMultiCall(fuelCalls, function(fuelResults) {
                     const deviceFuelMap = {};
-                    uniqueDeviceIds.forEach((devId, idx) => {
-                        deviceFuelMap[devId] = fuelResults[idx] || [];
-                    });
+                    uniqueDeviceIds.forEach((devId, idx) => { deviceFuelMap[devId] = fuelResults[idx] || []; });
 
-                    // Calcular combustible por conductor sumando el consumo durante sus trayectos
                     Object.keys(driverMap).forEach(dId => {
                         let totalFuel = 0;
                         const driverTrips = trips.filter(t => t.driver && t.driver.id === dId);
@@ -338,7 +335,6 @@ geotab.addin.fuelMonitor = function (outerApi, outerState) {
                             const tStop = new Date(t.stop).getTime();
 
                             let fuelStart = null, fuelStop = null;
-
                             for (let r of readings) {
                                 const rTime = new Date(r.dateTime).getTime();
                                 if (rTime >= tStart && fuelStart === null) fuelStart = r.data;
@@ -353,11 +349,10 @@ geotab.addin.fuelMonitor = function (outerApi, outerState) {
                         driverMap[dId].fuel = totalFuel;
                     });
 
-                    // Renderizado de tabla
                     let tableHtml = `
-                        <div class="card-result">
-                            <h3>Resumen Global de Conductores</h3>
-                            <table>
+                        <div style="background: #ffffff; border: 1px solid #dce2e6; border-radius: 6px; padding: 16px; margin-top: 16px;">
+                            <h3 style="margin: 0 0 12px 0; font-size: 15px; color: #2b537d;">Resumen Global de Conductores</h3>
+                            <table class="fuel-table">
                                 <thead>
                                     <tr>
                                         <th>Conductor</th>
@@ -375,7 +370,6 @@ geotab.addin.fuelMonitor = function (outerApi, outerState) {
                         const d = driverMap[id];
                         if (d.tripsCount > 0) {
                             const avg = d.distance > 0 ? (d.fuel / d.distance) * 100 : 0;
-                            const badgeClass = avg > 35 ? 'badge-high' : 'badge-good';
 
                             tableHtml += `
                                 <tr>
@@ -383,7 +377,7 @@ geotab.addin.fuelMonitor = function (outerApi, outerState) {
                                     <td>${d.tripsCount}</td>
                                     <td>${d.distance.toFixed(2)} km</td>
                                     <td>${d.fuel > 0 ? d.fuel.toFixed(2) + ' L' : '0 L'}</td>
-                                    <td><span class="badge-avg ${badgeClass}">${avg > 0 ? avg.toFixed(2) + ' L/100km' : 'N/D'}</span></td>
+                                    <td>${getConsumptionBadge(avg, threshold)}</td>
                                 </tr>`;
 
                             reportDataForExport.push({
@@ -410,20 +404,20 @@ geotab.addin.fuelMonitor = function (outerApi, outerState) {
                             renderBarChart(chartLabels, chartData, 'Consumo Medio (L/100km) por Conductor');
                         }
                     } else {
-                        panel.innerHTML = '<div class="card-result"><p>No se encontraron registros suficientes de trayectos o combustible para los conductores.</p></div>';
+                        panel.innerHTML = '<div style="background:#ffffff; border:1px solid #dce2e6; padding:16px; border-radius:6px;"><p style="margin:0;">No se encontraron registros de viajes o combustible para los conductores.</p></div>';
                     }
                 });
             });
         });
     }
 
-    function processSingleDriver(driverId, driverName, fromDate, toDate) {
+    function processSingleDriver(driverId, driverName, fromDate, toDate, threshold) {
         directCall('Get', {
             typeName: 'Trip',
             search: { userSearch: { id: driverId }, fromDate: fromDate, toDate: toDate }
         }, function(trips) {
             if (!trips || trips.length === 0) {
-                panel.innerHTML = '<div class="card-result"><p>No hay viajes registrados para este conductor en las fechas elegidas.</p></div>';
+                panel.innerHTML = '<div style="background:#ffffff; border:1px solid #dce2e6; padding:16px; border-radius:6px;"><p style="margin:0;">No hay viajes para este conductor.</p></div>';
                 return;
             }
 
@@ -442,9 +436,7 @@ geotab.addin.fuelMonitor = function (outerApi, outerState) {
 
             directMultiCall(fuelCalls, function(fuelResults) {
                 const deviceFuelMap = {};
-                Array.from(uniqueDeviceIds).forEach((devId, idx) => {
-                    deviceFuelMap[devId] = fuelResults[idx] || [];
-                });
+                Array.from(uniqueDeviceIds).forEach((devId, idx) => { deviceFuelMap[devId] = fuelResults[idx] || []; });
 
                 let totalFuel = 0;
                 trips.forEach(t => {
@@ -470,13 +462,13 @@ geotab.addin.fuelMonitor = function (outerApi, outerState) {
                 const avg = totalDistance > 0 ? (totalFuel / totalDistance) * 100 : 0;
 
                 panel.innerHTML = `
-                    <div class="card-result">
-                        <h3>Conductor: ${driverName}</h3>
+                    <div style="background:#ffffff; border:1px solid #dce2e6; border-radius:6px; padding:16px; margin-top:16px;">
+                        <h3 style="margin:0 0 12px 0; color:#2b537d;">Conductor: ${driverName}</h3>
                         <div style="display: flex; gap: 30px; margin-top: 10px;">
-                            <div><span style="font-size:12px; color:#5a6a75; font-weight:700; text-transform:uppercase;">Viajes</span><br><strong style="font-size:18px;">${trips.length}</strong></div>
-                            <div><span style="font-size:12px; color:#5a6a75; font-weight:700; text-transform:uppercase;">Distancia Total</span><br><strong style="font-size:18px;">${totalDistance.toFixed(2)} km</strong></div>
-                            <div><span style="font-size:12px; color:#5a6a75; font-weight:700; text-transform:uppercase;">Combustible Consumido</span><br><strong style="font-size:18px;">${totalFuel.toFixed(2)} Litros</strong></div>
-                            <div><span style="font-size:12px; color:#5a6a75; font-weight:700; text-transform:uppercase;">Consumo Medio</span><br><strong style="font-size:18px; color:${avg > 35 ? '#b91c1c' : '#15803d'};">${avg.toFixed(2)} L/100km</strong></div>
+                            <div><span style="font-size:11px; color:#5a6a75; font-weight:700; text-transform:uppercase;">Viajes</span><br><strong style="font-size:16px;">${trips.length}</strong></div>
+                            <div><span style="font-size:11px; color:#5a6a75; font-weight:700; text-transform:uppercase;">Distancia Total</span><br><strong style="font-size:16px;">${totalDistance.toFixed(2)} km</strong></div>
+                            <div><span style="font-size:11px; color:#5a6a75; font-weight:700; text-transform:uppercase;">Combustible Consumido</span><br><strong style="font-size:16px;">${totalFuel.toFixed(2)} Litros</strong></div>
+                            <div><span style="font-size:11px; color:#5a6a75; font-weight:700; text-transform:uppercase;">Consumo Medio</span><br>${getConsumptionBadge(avg, threshold)}</div>
                         </div>
                     </div>`;
 
@@ -521,10 +513,7 @@ geotab.addin.fuelMonitor = function (outerApi, outerState) {
             data: {
                 datasets: [{ label: title, data: dataset, borderColor: '#2b537d', backgroundColor: 'rgba(43, 83, 125, 0.08)', fill: true }]
             },
-            options: {
-                responsive: true, maintainAspectRatio: false,
-                scales: { x: { type: 'time' } }
-            }
+            options: { responsive: true, maintainAspectRatio: false, scales: { x: { type: 'time' } } }
         });
     }
 
