@@ -3,69 +3,80 @@
 <head>
     <meta charset="utf-8">
     <title>Informe de Combustible</title>
-    <!-- Mantenemos tus librerías de Chart.js -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
     <style>
-        /* Estilos básicos integrados para mantenerlo simple */
-        body { font-family: sans-serif; background: #f8fafc; margin: 0; }
-        .geotabField { padding: 8px; border: 1px solid #cbd5e1; border-radius: 4px; }
-        .geotabButton { padding: 8px 16px; background: #2563eb; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f8fafc; margin: 0; color: #1e293b; }
+        .container { padding: 20px; max-width: 1200px; margin: 0 auto; }
+        .card { background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 15px 20px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+        .controls-grid { display: flex; flex-wrap: wrap; gap: 15px; align-items: flex-end; }
+        .field-group { display: flex; flex-direction: column; gap: 5px; }
+        .field-group label { font-size: 13px; font-weight: 600; color: #475569; }
+        .geotabField { padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 14px; background: #fff; outline: none; }
+        .geotabField:focus { border-color: #2563eb; }
+        .geotabButton { padding: 9px 18px; background: #2563eb; color: #fff; border: none; border-radius: 6px; font-weight: 600; cursor: pointer; font-size: 14px; transition: background 0.2s; }
         .geotabButton:hover { background: #1d4ed8; }
         .geotabButton.excel { background: #16a34a; }
         .geotabButton.excel:hover { background: #15803d; }
+        table { width: 100%; border-collapse: collapse; margin-top: 15px; background: #fff; border-radius: 8px; overflow: hidden; }
+        th { background: #f1f5f9; text-align: left; padding: 12px 15px; font-size: 13px; font-weight: 700; color: #334155; border-bottom: 2px solid #e2e8f0; }
+        td { padding: 12px 15px; border-bottom: 1px solid #e2e8f0; font-size: 14px; }
+        tr:hover { background: #f8fafc; }
     </style>
 </head>
 <body>
-    <div id="fuel-monitor-container">
-        <header style="padding: 15px; background: #fff; border-bottom: 1px solid #e2e8f0;">
-            <h2 style="margin: 0;">Consumo de Combustible</h2>
+    <div id="fuel-monitor-container" class="container">
+        <header style="margin-bottom: 20px;">
+            <h2 style="margin: 0; color: #0f172a;">📊 Informe de Consumo de Combustible</h2>
         </header>
         
-        <div id="content" style="padding: 15px;">
-            
-            <!-- Selector de Modo -->
-            <div style="margin-bottom: 15px; padding: 10px; background: #fff; border-radius: 6px; border: 1px solid #e2e8f0;">
-                <label style="font-weight:bold; margin-right: 15px;">Analizar por:</label>
-                <input type="radio" id="modeVehicle" name="searchMode" value="Device" checked> 
-                <label for="modeVehicle" style="margin-right: 15px;">Vehículo</label>
-                
-                <input type="radio" id="modeDriver" name="searchMode" value="User"> 
-                <label for="modeDriver">Conductor</label>
-            </div>
+        <div class="card">
+            <div class="controls-grid">
+                <!-- Modo de Análisis -->
+                <div class="field-group">
+                    <label>Filtrar por:</label>
+                    <div style="display: flex; gap: 15px; padding: 8px 0;">
+                        <label style="font-weight: normal; cursor: pointer;">
+                            <input type="radio" id="modeVehicle" name="searchMode" value="Device" checked> Vehículos
+                        </label>
+                        <label style="font-weight: normal; cursor: pointer;">
+                            <input type="radio" id="modeDriver" name="searchMode" value="User"> Conductores
+                        </label>
+                    </div>
+                </div>
 
-            <!-- Buscador -->
-            <div style="margin-bottom: 15px;">
-                <label for="entitySearch" style="display:block; font-weight:bold; margin-bottom:5px;">
-                    Buscar Activo / Conductor:
-                </label>
-                <input type="text" id="entitySearch" list="entityList" class="geotabField" placeholder="Escribe para buscar..." style="width: 100%; max-width: 400px;">
-                <datalist id="entityList"></datalist>
-            </div>
+                <!-- Desplegable -->
+                <div class="field-group" style="flex-grow: 1; min-width: 250px;">
+                    <label for="entitySelect">Seleccionar Activo / Conductor:</label>
+                    <select id="entitySelect" class="geotabField" style="width: 100%;">
+                        <option value="ALL">-- TODOS --</option>
+                    </select>
+                </div>
 
-            <!-- Selector de Fechas -->
-            <div style="margin-bottom: 20px; display: flex; gap: 15px; flex-wrap: wrap;">
-                <div>
-                    <label for="dateFrom" style="display:block; font-weight:bold; margin-bottom:5px;">Desde:</label>
+                <!-- Fechas -->
+                <div class="field-group">
+                    <label for="dateFrom">Desde:</label>
                     <input type="date" id="dateFrom" class="geotabField">
                 </div>
-                <div>
-                    <label for="dateTo" style="display:block; font-weight:bold; margin-bottom:5px;">Hasta:</label>
+                <div class="field-group">
+                    <label for="dateTo">Hasta:</label>
                     <input type="date" id="dateTo" class="geotabField">
                 </div>
-            </div>
 
-            <!-- Botones de Acción -->
-            <div style="margin-bottom: 20px; display: flex; gap: 10px;">
-                <button id="btn-fetch-data" class="geotabButton">Generar Informe</button>
-                <button id="btn-export-excel" class="geotabButton excel" style="display: none;">📥 Exportar Excel (CSV)</button>
+                <!-- Botones -->
+                <div style="display: flex; gap: 10px;">
+                    <button id="btn-fetch-data" class="geotabButton">Generar Informe</button>
+                    <button id="btn-export-excel" class="geotabButton excel" style="display: none;">📥 Exportar Excel</button>
+                </div>
             </div>
-            
-            <!-- Panel de Resultados -->
-            <div id="results-panel"></div>
+        </div>
+        
+        <!-- Panel de Resultados / Tablas -->
+        <div id="results-panel"></div>
 
-            <!-- Contenedor del Gráfico -->
-            <div class="chart-container" style="margin-top: 30px; position: relative; height:350px; display: none;" id="chartWrapper">
+        <!-- Contenedor de la Gráfica -->
+        <div class="card" id="chartWrapper" style="display: none; margin-top: 20px;">
+            <div style="position: relative; height: 350px;">
                 <canvas id="fuelChart"></canvas>
             </div>
         </div>
