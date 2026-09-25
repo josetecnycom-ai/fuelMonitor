@@ -45,6 +45,31 @@ geotab.addin.fuelMonitor = function (outerApi, outerState) {
         </span>`;
     }
 
+    // Interpolación lineal del acumulado de combustible en un instante exacto (ms)
+    function getInterpolatedFuel(readings, targetTimeMs) {
+        if (!readings || readings.length === 0) return null;
+
+        const tFirst = new Date(readings[0].dateTime).getTime();
+        const tLast = new Date(readings[readings.length - 1].dateTime).getTime();
+
+        if (targetTimeMs <= tFirst) return readings[0].data;
+        if (targetTimeMs >= tLast) return readings[readings.length - 1].data;
+
+        let prev = readings[0];
+        for (let i = 0; i < readings.length; i++) {
+            const rTime = new Date(readings[i].dateTime).getTime();
+            if (rTime === targetTimeMs) return readings[i].data;
+            if (rTime > targetTimeMs) {
+                const next = readings[i];
+                const prevTime = new Date(prev.dateTime).getTime();
+                const factor = (targetTimeMs - prevTime) / (rTime - prevTime);
+                return prev.data + factor * (next.data - prev.data);
+            }
+            prev = readings[i];
+        }
+        return readings[readings.length - 1].data;
+    }
+
     function directCall(method, params, successCallback, errorCallback) {
         currentApi.getSession(function(credentials, server) {
             var url = 'https://' + (server || 'my.geotab.com') + '/apiv1';
@@ -329,17 +354,13 @@ geotab.addin.fuelMonitor = function (outerApi, outerState) {
                         driverTrips.forEach(t => {
                             if (!t.device || !deviceFuelMap[t.device.id]) return;
                             const readings = deviceFuelMap[t.device.id];
-                            if (readings.length < 2) return;
+                            if (readings.length === 0) return;
 
                             const tStart = new Date(t.start).getTime();
                             const tStop = new Date(t.stop).getTime();
 
-                            let fuelStart = null, fuelStop = null;
-                            for (let r of readings) {
-                                const rTime = new Date(r.dateTime).getTime();
-                                if (rTime >= tStart && fuelStart === null) fuelStart = r.data;
-                                if (rTime <= tStop) fuelStop = r.data;
-                            }
+                            const fuelStart = getInterpolatedFuel(readings, tStart);
+                            const fuelStop = getInterpolatedFuel(readings, tStop);
 
                             if (fuelStart !== null && fuelStop !== null && fuelStop >= fuelStart) {
                                 totalFuel += (fuelStop - fuelStart);
@@ -442,17 +463,13 @@ geotab.addin.fuelMonitor = function (outerApi, outerState) {
                 trips.forEach(t => {
                     if (!t.device || !deviceFuelMap[t.device.id]) return;
                     const readings = deviceFuelMap[t.device.id];
-                    if (readings.length < 2) return;
+                    if (readings.length === 0) return;
 
                     const tStart = new Date(t.start).getTime();
                     const tStop = new Date(t.stop).getTime();
 
-                    let fuelStart = null, fuelStop = null;
-                    for (let r of readings) {
-                        const rTime = new Date(r.dateTime).getTime();
-                        if (rTime >= tStart && fuelStart === null) fuelStart = r.data;
-                        if (rTime <= tStop) fuelStop = r.data;
-                    }
+                    const fuelStart = getInterpolatedFuel(readings, tStart);
+                    const fuelStop = getInterpolatedFuel(readings, tStop);
 
                     if (fuelStart !== null && fuelStop !== null && fuelStop >= fuelStart) {
                         totalFuel += (fuelStop - fuelStart);
