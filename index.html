@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Informe de Combustible</title>
+    <!-- Mantenemos tus librerías de Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
+    <style>
+        /* Estilos básicos integrados para mantenerlo simple */
+        body { font-family: sans-serif; background: #f8fafc; margin: 0; }
+        .geotabField { padding: 8px; border: 1px solid #cbd5e1; border-radius: 4px; }
+        .geotabButton { padding: 8px 16px; background: #2563eb; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
+        .geotabButton:hover { background: #1d4ed8; }
+        .geotabButton.excel { background: #16a34a; }
+        .geotabButton.excel:hover { background: #15803d; }
+    </style>
+</head>
+<body>
+    <div id="fuel-monitor-container">
+        <header style="padding: 15px; background: #fff; border-bottom: 1px solid #e2e8f0;">
+            <h2 style="margin: 0;">Consumo de Combustible</h2>
+        </header>
+        
+        <div id="content" style="padding: 15px;">
+            
+            <!-- Selector de Modo -->
+            <div style="margin-bottom: 15px; padding: 10px; background: #fff; border-radius: 6px; border: 1px solid #e2e8f0;">
+                <label style="font-weight:bold; margin-right: 15px;">Analizar por:</label>
+                <input type="radio" id="modeVehicle" name="searchMode" value="Device" checked> 
+                <label for="modeVehicle" style="margin-right: 15px;">Vehículo</label>
+                
+                <input type="radio" id="modeDriver" name="searchMode" value="User"> 
+                <label for="modeDriver">Conductor</label>
+            </div>
+
+            <!-- Buscador -->
+            <div style="margin-bottom: 15px;">
+                <label for="entitySearch" style="display:block; font-weight:bold; margin-bottom:5px;">
+                    Buscar Activo / Conductor:
+                </label>
+                <input type="text" id="entitySearch" list="entityList" class="geotabField" placeholder="Escribe para buscar..." style="width: 100%; max-width: 400px;">
+                <datalist id="entityList"></datalist>
+            </div>
+
+            <!-- Selector de Fechas -->
+            <div style="margin-bottom: 20px; display: flex; gap: 15px; flex-wrap: wrap;">
+                <div>
+                    <label for="dateFrom" style="display:block; font-weight:bold; margin-bottom:5px;">Desde:</label>
+                    <input type="date" id="dateFrom" class="geotabField">
+                </div>
+                <div>
+                    <label for="dateTo" style="display:block; font-weight:bold; margin-bottom:5px;">Hasta:</label>
+                    <input type="date" id="dateTo" class="geotabField">
+                </div>
+            </div>
+
+            <!-- Botones de Acción -->
+            <div style="margin-bottom: 20px; display: flex; gap: 10px;">
+                <button id="btn-fetch-data" class="geotabButton">Generar Informe</button>
+                <button id="btn-export-excel" class="geotabButton excel" style="display: none;">📥 Exportar Excel (CSV)</button>
+            </div>
+            
+            <!-- Panel de Resultados -->
+            <div id="results-panel"></div>
+
+            <!-- Contenedor del Gráfico -->
+            <div class="chart-container" style="margin-top: 30px; position: relative; height:350px; display: none;" id="chartWrapper">
+                <canvas id="fuelChart"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
