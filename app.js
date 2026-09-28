@@ -256,7 +256,7 @@ fuelData.length
                 }
             }]);
             console.log("Trips:", trips.length);
-console.log(deviceDistanceMap);
+
             api.multiCall(fuelCalls, function (fuelResults) {
                 // Mapa de datos de combustible por vehículo
                 const deviceFuelDataMap = {};
@@ -452,7 +452,7 @@ return diff > 0
             html += `
                 <tr ${rowStyle}>
                     <td style="font-weight: 600;">${escapeHtml(row.name)}</td>
-                    <td>${mode === "User"
+                    ${mode === "User"
 ? `<td>${row.tripsCount}</td>`
 : ""}
                     <td style="text-align: right;">${row.distanceKm.toLocaleString('es-ES')}</td>
