@@ -154,6 +154,10 @@ geotab.addin.fuelMonitor = function (api, state) {
 sortFuelData(
 fuelResults[i] || []
 );
+                        console.log(
+device.name,
+fuelData.length
+);
 
                         let fuelLiters = 0;
                         let hasCanBus = false;
@@ -247,11 +251,12 @@ fuelResults[i] || []
                 search: {
                     deviceId: devId,
                     diagnosticSearch: { id: DIAGNOSTICS.FUEL_USED },
-                    fromDate: expandedFrom,
-                    toDate: expandedTo
+                    fromDate: fromDate,
+                    toDate: toDate
                 }
             }]);
-
+            console.log("Trips:", trips.length);
+console.log(deviceDistanceMap);
             api.multiCall(fuelCalls, function (fuelResults) {
                 // Mapa de datos de combustible por vehículo
                 const deviceFuelDataMap = {};
@@ -449,7 +454,7 @@ return diff > 0
                     <td style="font-weight: 600;">${escapeHtml(row.name)}</td>
                     <td>${mode === "User"
 ? `<td>${row.tripsCount}</td>`
-: ""}</td>
+: ""}
                     <td style="text-align: right;">${row.distanceKm.toLocaleString('es-ES')}</td>
                     <td style="text-align: right;">${row.fuelLiters.toLocaleString('es-ES')}</td>
                     <td style="text-align: right; ${textAlertStyle}">${row.avgConsumption.toLocaleString('es-ES')}</td>
