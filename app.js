@@ -165,6 +165,11 @@ fuelData.length
                         if (fuelData.length >= 2) {
                             const startFuel = fuelData[0].data;
                             const endFuel = fuelData[fuelData.length - 1].data;
+                            console.log(
+device.name,
+fuelData[0].data,
+fuelData[fuelData.length - 1].data
+);
                             const diff = endFuel - startFuel;
                             if (diff >= 0) {
                                 fuelLiters = diff;
@@ -173,7 +178,13 @@ fuelData.length
                         }
 
                         let avgConsumption = (distKm > 0 && hasCanBus) ? (fuelLiters / distKm) * 100.0 : 0;
-
+                        console.log({
+vehiculo: device.name,
+distKm,
+fuelLiters,
+avgConsumption,
+hasCanBus
+});
                         currentReportData.push({
                             id: device.id,
                             name: device.name,
