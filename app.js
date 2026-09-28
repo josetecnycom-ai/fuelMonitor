@@ -163,6 +163,12 @@ fuelData.length
                         let hasCanBus = false;
 
                         if (fuelData.length >= 2) {
+                            console.log(
+device.name,
+fuelData[0].controller,
+fuelData[fuelData.length-1].controller
+);
+``
                             const startFuel = fuelData[0].data;
                             const endFuel = fuelData[fuelData.length - 1].data;
                             console.log(
