@@ -1,6 +1,6 @@
 /**
  * Add-in de Monitorización de Consumo de Combustible para MyGeotab
- * Archivo: app.js (Optimizado para Cuotas de API y Telemetría CAN-bus)
+ * Archivo: app.js
  */
 
 geotab.addin.fuelMonitor = function (api, state) {
@@ -12,7 +12,7 @@ geotab.addin.fuelMonitor = function (api, state) {
         FUEL_USED: "DiagnosticTotalFuelUsedId"
     };
 
-    // Umbral mínimo de distancia para filtrar micro-movimientos en conductores
+    // Umbral mínimo de distancia para procesar trayectos
     const MIN_TRIP_DISTANCE_KM = 0;
 
     return {
@@ -109,11 +109,15 @@ geotab.addin.fuelMonitor = function (api, state) {
     }
 
     // =========================================================================
-    // 3. CÁLCULO OPTIMIZADO POR VEHÍCULO
+    // 3. CÁLCULO OPTIMIZADO POR VEHÍCULO CON MARGEN TEMPORAL Y INTERPOLACIÓN
     // =========================================================================
 
     function processVehiclesReport(api, selectedId, fromDate, toDate) {
         const deviceSearch = selectedId === "ALL" ? {} : { id: selectedId };
+
+        // Margen de +-24 horas para garantizar puntos de interpolación
+        const expandedFrom = new Date(new Date(fromDate).getTime() - 24 * 60 * 60 * 1000).toISOString();
+        const expandedTo = new Date(new Date(toDate).getTime() + 24 * 60 * 60 * 1000).toISOString();
 
         api.call("Get", { typeName: "Device", search: deviceSearch }, function (devices) {
             if (!devices || devices.length === 0) {
@@ -121,7 +125,6 @@ geotab.addin.fuelMonitor = function (api, state) {
                 return;
             }
 
-            // Petición de Trips para obtener la distancia real exacta del periodo
             const tripSearch = { fromDate: fromDate, toDate: toDate };
             if (selectedId !== "ALL") tripSearch.deviceId = selectedId;
 
@@ -133,14 +136,13 @@ geotab.addin.fuelMonitor = function (api, state) {
                     deviceDistanceMap[devId] += (t.distance || 0);
                 });
 
-                // Consulta de combustible acumulado (1 llamada por vehículo)
                 let calls = devices.map(d => ["Get", {
                     typeName: "StatusData",
                     search: {
                         deviceId: d.id,
                         diagnosticSearch: { id: DIAGNOSTICS.FUEL_USED },
-                        fromDate: fromDate,
-                        toDate: toDate
+                        fromDate: expandedFrom,
+                        toDate: expandedTo
                     }
                 }]);
 
@@ -150,47 +152,21 @@ geotab.addin.fuelMonitor = function (api, state) {
                     for (let i = 0; i < devices.length; i++) {
                         const device = devices[i];
                         const distKm = deviceDistanceMap[device.id] || 0;
-                        const fuelData =
-sortFuelData(
-fuelResults[i] || []
-);
-                        console.log(
-device.name,
-fuelData.length
-);
+                        const rawFuelData = fuelResults[i] || [];
+
+                        const startFuel = getInterpolatedFuelValue(rawFuelData, fromDate);
+                        const endFuel = getInterpolatedFuelValue(rawFuelData, toDate);
 
                         let fuelLiters = 0;
                         let hasCanBus = false;
 
-                        if (fuelData.length >= 2) {
-                            console.log(
-device.name,
-fuelData[0].controller,
-fuelData[fuelData.length-1].controller
-);
-``
-                            const startFuel = fuelData[0].data;
-                            const endFuel = fuelData[fuelData.length - 1].data;
-                            console.log(
-device.name,
-fuelData[0].data,
-fuelData[fuelData.length - 1].data
-);
-                            const diff = endFuel - startFuel;
-                            if (diff >= 0) {
-                                fuelLiters = diff;
-                                hasCanBus = true;
-                            }
+                        if (startFuel !== null && endFuel !== null && endFuel >= startFuel) {
+                            fuelLiters = endFuel - startFuel;
+                            hasCanBus = true;
                         }
 
                         let avgConsumption = (distKm > 0 && hasCanBus) ? (fuelLiters / distKm) * 100.0 : 0;
-                        console.log({
-vehiculo: device.name,
-distKm,
-fuelLiters,
-avgConsumption,
-hasCanBus
-});
+
                         currentReportData.push({
                             id: device.id,
                             name: device.name,
@@ -212,70 +188,137 @@ hasCanBus
     }
 
     // =========================================================================
-    // 4. CÁLCULO OPTIMIZADO POR CONDUCTOR (SIN EXCEDER CUOTA)
+    // 4. CÁLCULO POR CONDUCTOR BASADO EN DRIVERCHANGE Y MARGEN TEMPORAL
     // =========================================================================
 
     function processDriversReport(api, selectedId, fromDate, toDate) {
-        const tripSearch = { fromDate: fromDate, toDate: toDate };
-        if (selectedId !== "ALL") {
-            tripSearch.driverSearch = { id: selectedId };
-        }
+        const expandedFrom = new Date(new Date(fromDate).getTime() - 24 * 60 * 60 * 1000).toISOString();
+        const expandedTo = new Date(new Date(toDate).getTime() + 24 * 60 * 60 * 1000).toISOString();
 
-        // Obtener todos los viajes del rango en UNA sola llamada
-        api.call("Get", { typeName: "Trip", search: tripSearch }, function (trips) {
+        // Consulta paralela de Trips, DriverChange y Users
+        const multiCallRequests = [
+            ["Get", { typeName: "Trip", search: { fromDate: fromDate, toDate: toDate } }],
+            ["Get", { typeName: "DriverChange", search: { fromDate: expandedFrom, toDate: expandedTo } }],
+            ["Get", { typeName: "User", search: { isDriver: true } }]
+        ];
+
+        api.multiCall(multiCallRequests, function (results) {
+            const trips = results[0] || [];
+            const driverChanges = results[1] || [];
+            const users = results[2] || [];
+
             if (!trips || trips.length === 0) {
-                renderEmptyResults("No se registraron viajes para los criterios seleccionados.");
+                renderEmptyResults("No se registraron viajes para el período seleccionado.");
                 return;
+            }
+
+            // Mapa de nombres de usuario
+            const userMap = {};
+            users.forEach(u => {
+                const fullName = `${u.firstName || ''} ${u.lastName || ''}`.trim() || u.name;
+                userMap[u.id] = fullName;
+            });
+
+            // Indexar DriverChange por deviceId y ordenar por tiempo
+            const driverChangesByDevice = {};
+            driverChanges.forEach(dc => {
+                if (dc.device && dc.device.id) {
+                    const devId = dc.device.id;
+                    if (!driverChangesByDevice[devId]) driverChangesByDevice[devId] = [];
+                    driverChangesByDevice[devId].push(dc);
+                }
+            });
+
+            Object.keys(driverChangesByDevice).forEach(devId => {
+                driverChangesByDevice[devId].sort((a, b) => new Date(a.dateTime).getTime() - new Date(b.dateTime).getTime());
+            });
+
+            // Reconstrucción del conductor del viaje mediante DriverChange
+            function resolveDriverForTrip(trip) {
+                const devId = trip.device ? trip.device.id : null;
+                const tStart = new Date(trip.start).getTime();
+
+                if (devId && driverChangesByDevice[devId]) {
+                    const changes = driverChangesByDevice[devId];
+                    let matchedDriverId = null;
+
+                    for (let i = 0; i < changes.length; i++) {
+                        const dcTime = new Date(changes[i].dateTime).getTime();
+                        if (dcTime <= tStart) {
+                            if (changes[i].driver && changes[i].driver.id) {
+                                matchedDriverId = changes[i].driver.id;
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+
+                    if (matchedDriverId && matchedDriverId !== "NoDriverId" && matchedDriverId !== "UnknownDriverId") {
+                        return matchedDriverId;
+                    }
+                }
+
+                // Fallback a Trip.driver si está presente y no es indeterminado
+                if (trip.driver && trip.driver.id && trip.driver.id !== "NoDriverId" && trip.driver.id !== "UnknownDriverId") {
+                    return trip.driver.id;
+                }
+
+                return "UNKNOWN";
             }
 
             const validTrips = trips.filter(t => (t.distance || 0) >= MIN_TRIP_DISTANCE_KM);
 
-            if (validTrips.length === 0) {
-                renderEmptyResults(`No hay viajes registrados superiores a ${MIN_TRIP_DISTANCE_KM} km.`);
-                return;
-            }
-
-            // Agrupar por conductor y recopilar vehículos involucrados
             const driverMap = {};
             const activeDeviceIds = new Set();
 
             validTrips.forEach(t => {
-                const driverId = (t.driver && t.driver.id !== "NoDriverId") ? t.driver.id : "UNKNOWN";
-                const driverName = (t.driver && (t.driver.name || t.driver.firstName)) 
-                    ? `${t.driver.firstName || ''} ${t.driver.lastName || ''}`.trim() || t.driver.name
-                    : "Sin Identificar";
+                const resolvedDriverId = resolveDriverForTrip(t);
 
-                if (!driverMap[driverId]) {
-                    driverMap[driverId] = {
-                        id: driverId,
+                // Filtrar por conductor si hay selección individual
+                if (selectedId !== "ALL" && resolvedDriverId !== selectedId) {
+                    return;
+                }
+
+                const driverName = resolvedDriverId === "UNKNOWN" 
+                    ? "Conductor No Identificado" 
+                    : (userMap[resolvedDriverId] || resolvedDriverId);
+
+                if (!driverMap[resolvedDriverId]) {
+                    driverMap[resolvedDriverId] = {
+                        id: resolvedDriverId,
                         name: driverName,
                         trips: [],
                         totalDistanceKm: 0
                     };
                 }
-                driverMap[driverId].trips.push(t);
-                driverMap[driverId].totalDistanceKm += (t.distance || 0);
+
+                driverMap[resolvedDriverId].trips.push(t);
+                driverMap[resolvedDriverId].totalDistanceKm += (t.distance || 0);
 
                 if (t.device && t.device.id) {
                     activeDeviceIds.add(t.device.id);
                 }
             });
 
-            // Pedir la telemetría solo para los vehículos involucrados (1 llamada por vehículo activo)
+            const driverKeys = Object.keys(driverMap);
+            if (driverKeys.length === 0) {
+                renderEmptyResults("No existen datos de viajes atribuidos al conductor seleccionado.");
+                return;
+            }
+
+            // Consultar telemetría StatusData con ventana expandida para los vehículos involucrados
             const deviceArray = Array.from(activeDeviceIds);
             let fuelCalls = deviceArray.map(devId => ["Get", {
                 typeName: "StatusData",
                 search: {
                     deviceId: devId,
                     diagnosticSearch: { id: DIAGNOSTICS.FUEL_USED },
-                    fromDate: fromDate,
-                    toDate: toDate
+                    fromDate: expandedFrom,
+                    toDate: expandedTo
                 }
             }]);
-            console.log("Trips:", trips.length);
 
             api.multiCall(fuelCalls, function (fuelResults) {
-                // Mapa de datos de combustible por vehículo
                 const deviceFuelDataMap = {};
                 deviceArray.forEach((devId, idx) => {
                     deviceFuelDataMap[devId] = fuelResults[idx] || [];
@@ -283,8 +326,7 @@ hasCanBus
 
                 currentReportData = [];
 
-                // Correlación local en JS entre viaje y telemetría de combustible
-                Object.keys(driverMap).forEach(dKey => {
+                driverKeys.forEach(dKey => {
                     const driverGroup = driverMap[dKey];
                     let totalFuelLiters = 0;
                     let validTripsWithCan = 0;
@@ -293,7 +335,7 @@ hasCanBus
                         const devFuelList = deviceFuelDataMap[trip.device.id] || [];
                         if (devFuelList.length >= 2) {
                             const tripFuel = getFuelForTimeRange(devFuelList, trip.start, trip.stop);
-                            if (tripFuel >= 0) {
+                            if (tripFuel > 0) {
                                 totalFuelLiters += tripFuel;
                                 validTripsWithCan++;
                             }
@@ -309,7 +351,7 @@ hasCanBus
                         distanceKm: parseFloat(dist.toFixed(2)),
                         fuelLiters: parseFloat(totalFuelLiters.toFixed(2)),
                         avgConsumption: parseFloat(avg.toFixed(2)),
-                        hasCanBus: validTripsWithCan > 0,
+                        hasCanBus: validTripsWithCan > 0 || totalFuelLiters > 0,
                         tripsCount: driverGroup.trips.length
                     });
                 });
@@ -320,109 +362,63 @@ hasCanBus
 
         }, showError);
     }
-//Bloque añadido
-    function sortFuelData(data) {
-return (data || []).sort(
-(a, b) =>
-new Date(a.dateTime).getTime() -
-new Date(b.dateTime).getTime()
-);
-}
- 
-function getInterpolatedFuelValue(
-fuelDataList,
-targetTime
-) {
- 
-const target =
-new Date(targetTime).getTime();
- 
-const data =
-sortFuelData(fuelDataList);
- 
-let before = null;
-let after = null;
- 
-for (const point of data) {
- 
-const t =
-new Date(point.dateTime)
-.getTime();
- 
-if (t <= target) {
-before = point;
-}
- 
-if (t >= target) {
-after = point;
-break;
-}
-}
- 
-if (!before && !after)
-return null;
- 
-if (!before)
-return after.data;
- 
-if (!after)
-return before.data;
- 
-const t1 =
-new Date(before.dateTime)
-.getTime();
- 
-const t2 =
-new Date(after.dateTime)
-.getTime();
- 
-if (t1 === t2)
-return before.data;
- 
-const ratio =
-(target - t1) /
-(t2 - t1);
- 
-return before.data +
-((after.data - before.data) * ratio);
-}
-    
-    // Calcula el combustible gastado en la ventana temporal de un viaje, CAMBIO REALIZADO
-    function getFuelForTimeRange(
-fuelDataList,
-startTime,
-stopTime
-) {
- 
-const fuelStart =
-getInterpolatedFuelValue(
-fuelDataList,
-startTime
-);
- 
-const fuelStop =
-getInterpolatedFuelValue(
-fuelDataList,
-stopTime
-);
- 
-if (
-fuelStart === null ||
-fuelStop === null
-) {
-return 0;
-}
- 
-const diff =
-fuelStop - fuelStart;
- 
-return diff > 0
-? diff
-: 0;
-}
 
     // =========================================================================
-    // 5. RENDERIZADO (TABLA Y GRÁFICO)
+    // 5. INTERPOLACIÓN Y CÁLCULO DE COMBUSTIBLE
+    // =========================================================================
+
+    function sortFuelData(data) {
+        return (data || []).sort((a, b) => new Date(a.dateTime).getTime() - new Date(b.dateTime).getTime());
+    }
+
+    function getInterpolatedFuelValue(fuelDataList, targetTime) {
+        const target = new Date(targetTime).getTime();
+        const data = sortFuelData(fuelDataList);
+
+        let before = null;
+        let after = null;
+
+        for (const point of data) {
+            const t = new Date(point.dateTime).getTime();
+            if (t <= target) {
+                before = point;
+            }
+            if (t >= target) {
+                after = point;
+                break;
+            }
+        }
+
+        // Estricto: Si no existe punto anterior Y posterior en el rango expandido, descartar
+        if (!before || !after) {
+            return null;
+        }
+
+        const t1 = new Date(before.dateTime).getTime();
+        const t2 = new Date(after.dateTime).getTime();
+
+        if (t1 === t2) return before.data;
+
+        const ratio = (target - t1) / (t2 - t1);
+        return before.data + ((after.data - before.data) * ratio);
+    }
+
+    function getFuelForTimeRange(fuelDataList, startTime, stopTime) {
+        const fuelStart = getInterpolatedFuelValue(fuelDataList, startTime);
+        const fuelStop = getInterpolatedFuelValue(fuelDataList, stopTime);
+
+        if (fuelStart === null || fuelStop === null) {
+            return 0;
+        }
+
+        const diff = fuelStop - fuelStart;
+
+        // Descartar valores negativos (reinicios de contador) o nulos
+        return diff > 0 ? diff : 0;
+    }
+
+    // =========================================================================
+    // 6. RENDERIZADO (TABLA Y GRÁFICO)
     // =========================================================================
 
     function renderTable(mode) {
@@ -440,9 +436,7 @@ return diff > 0
                 <thead>
                     <tr>
                         <th>${mode === "Device" ? "Vehículo / Activo" : "Conductor"}</th>
-                        ${mode === "User"
-? "<th>Viajes Analizados</th>"
-: ""}
+                        ${mode === "User" ? "<th>Viajes Analizados</th>" : ""}
                         <th style="text-align: right;">Distancia (km)</th>
                         <th style="text-align: right;">Combustible (L)</th>
                         <th style="text-align: right;">Consumo Medio (L/100km)</th>
@@ -469,9 +463,7 @@ return diff > 0
             html += `
                 <tr ${rowStyle}>
                     <td style="font-weight: 600;">${escapeHtml(row.name)}</td>
-                    ${mode === "User"
-? `<td>${row.tripsCount}</td>`
-: ""}
+                    ${mode === "User" ? `<td>${row.tripsCount}</td>` : ""}
                     <td style="text-align: right;">${row.distanceKm.toLocaleString('es-ES')}</td>
                     <td style="text-align: right;">${row.fuelLiters.toLocaleString('es-ES')}</td>
                     <td style="text-align: right; ${textAlertStyle}">${row.avgConsumption.toLocaleString('es-ES')}</td>
@@ -539,7 +531,7 @@ return diff > 0
     }
 
     // =========================================================================
-    // 6. EXPORTACIÓN CSV (UTF-8 BOM)
+    // 7. EXPORTACIÓN CSV (UTF-8 BOM)
     // =========================================================================
 
     function exportToCSV() {
@@ -555,10 +547,7 @@ return diff > 0
 
         currentReportData.forEach(row => {
             const status = !row.hasCanBus ? "Sin Datos CAN" : (row.avgConsumption > threshold ? "Excede Umbral" : "Normal");
-            const col2 =
-mode === "User"
-? row.tripsCount
-: "";
+            const col2 = mode === "User" ? row.tripsCount : "";
             
             const distStr = row.distanceKm.toString().replace('.', ',');
             const fuelStr = row.fuelLiters.toString().replace('.', ',');
@@ -578,7 +567,7 @@ mode === "User"
     }
 
     // =========================================================================
-    // 7. UTILIDADES
+    // 8. UTILIDADES
     // =========================================================================
 
     function showLoading() {
