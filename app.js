@@ -109,15 +109,17 @@ geotab.addin.fuelMonitor = function (api, state) {
     }
 
     // =========================================================================
-    // 3. CÁLCULO OPTIMIZADO POR VEHÍCULO CON MARGEN TEMPORAL Y INTERPOLACIÓN
+    // 3. CÁLCULO OPTIMIZADO POR VEHÍCULO
     // =========================================================================
 
     function processVehiclesReport(api, selectedId, fromDate, toDate) {
         const deviceSearch = selectedId === "ALL" ? {} : { id: selectedId };
 
-        // Margen de +-24 horas para garantizar puntos de interpolación
         const expandedFrom = new Date(new Date(fromDate).getTime() - 24 * 60 * 60 * 1000).toISOString();
         const expandedTo = new Date(new Date(toDate).getTime() + 24 * 60 * 60 * 1000).toISOString();
+
+        const fromDateTs = new Date(fromDate).getTime();
+        const toDateTs = new Date(toDate).getTime();
 
         api.call("Get", { typeName: "Device", search: deviceSearch }, function (devices) {
             if (!devices || devices.length === 0) {
@@ -152,10 +154,10 @@ geotab.addin.fuelMonitor = function (api, state) {
                     for (let i = 0; i < devices.length; i++) {
                         const device = devices[i];
                         const distKm = deviceDistanceMap[device.id] || 0;
-                        const rawFuelData = fuelResults[i] || [];
+                        const cleanFuelList = prepareFuelData(fuelResults[i] || []);
 
-                        const startFuel = getInterpolatedFuelValue(rawFuelData, fromDate);
-                        const endFuel = getInterpolatedFuelValue(rawFuelData, toDate);
+                        const startFuel = getInterpolatedFuelValue(cleanFuelList, fromDateTs);
+                        const endFuel = getInterpolatedFuelValue(cleanFuelList, toDateTs);
 
                         let fuelLiters = 0;
                         let hasCanBus = false;
@@ -188,14 +190,13 @@ geotab.addin.fuelMonitor = function (api, state) {
     }
 
     // =========================================================================
-    // 4. CÁLCULO POR CONDUCTOR BASADO EN DRIVERCHANGE Y MARGEN TEMPORAL
+    // 4. CÁLCULO OPTIMIZADO POR CONDUCTOR (DRIVERCHANGE + PREPROCESAMIENTO)
     // =========================================================================
 
     function processDriversReport(api, selectedId, fromDate, toDate) {
         const expandedFrom = new Date(new Date(fromDate).getTime() - 24 * 60 * 60 * 1000).toISOString();
         const expandedTo = new Date(new Date(toDate).getTime() + 24 * 60 * 60 * 1000).toISOString();
 
-        // Consulta paralela de Trips, DriverChange y Users
         const multiCallRequests = [
             ["Get", { typeName: "Trip", search: { fromDate: fromDate, toDate: toDate } }],
             ["Get", { typeName: "DriverChange", search: { fromDate: expandedFrom, toDate: expandedTo } }],
@@ -203,51 +204,72 @@ geotab.addin.fuelMonitor = function (api, state) {
         ];
 
         api.multiCall(multiCallRequests, function (results) {
-            const trips = results[0] || [];
-            const driverChanges = results[1] || [];
-            const users = results[2] || [];
+            const rawTrips = results[0] || [];
+            const rawDriverChanges = results[1] || [];
+            const rawUsers = results[2] || [];
 
-            if (!trips || trips.length === 0) {
+            if (!rawTrips || rawTrips.length === 0) {
                 renderEmptyResults("No se registraron viajes para el período seleccionado.");
                 return;
             }
 
-            // Mapa de nombres de usuario
+            // 1. Mapa de nombres de usuario
             const userMap = {};
-            users.forEach(u => {
+            rawUsers.forEach(u => {
                 const fullName = `${u.firstName || ''} ${u.lastName || ''}`.trim() || u.name;
                 userMap[u.id] = fullName;
             });
 
-            // Indexar DriverChange por deviceId y ordenar por tiempo
+            // 2. Preprocesar y ordenar DriverChange por timestamps numéricos
             const driverChangesByDevice = {};
-            driverChanges.forEach(dc => {
+            rawDriverChanges.forEach(dc => {
                 if (dc.device && dc.device.id) {
                     const devId = dc.device.id;
                     if (!driverChangesByDevice[devId]) driverChangesByDevice[devId] = [];
-                    driverChangesByDevice[devId].push(dc);
+                    driverChangesByDevice[devId].push({
+                        driverId: dc.driver ? dc.driver.id : null,
+                        _ts: new Date(dc.dateTime).getTime()
+                    });
                 }
             });
 
             Object.keys(driverChangesByDevice).forEach(devId => {
-                driverChangesByDevice[devId].sort((a, b) => new Date(a.dateTime).getTime() - new Date(b.dateTime).getTime());
+                driverChangesByDevice[devId].sort((a, b) => a._ts - b._ts);
             });
 
-            // Reconstrucción del conductor del viaje mediante DriverChange
+            // 3. Preprocesar viajes con timestamps numéricos
+            const validTrips = [];
+            rawTrips.forEach(t => {
+                const dist = t.distance || 0;
+                if (dist >= MIN_TRIP_DISTANCE_KM) {
+                    validTrips.push({
+                        raw: t,
+                        deviceId: t.device ? t.device.id : null,
+                        distance: dist,
+                        startTs: new Date(t.start).getTime(),
+                        stopTs: new Date(t.stop).getTime(),
+                        driverId: t.driver ? t.driver.id : null
+                    });
+                }
+            });
+
+            if (validTrips.length === 0) {
+                renderEmptyResults("No hay viajes válidos en el rango seleccionado.");
+                return;
+            }
+
+            // Asignación rápida de conductor por viaje
             function resolveDriverForTrip(trip) {
-                const devId = trip.device ? trip.device.id : null;
-                const tStart = new Date(trip.start).getTime();
+                const devId = trip.deviceId;
+                const tStart = trip.startTs;
 
                 if (devId && driverChangesByDevice[devId]) {
                     const changes = driverChangesByDevice[devId];
                     let matchedDriverId = null;
 
                     for (let i = 0; i < changes.length; i++) {
-                        const dcTime = new Date(changes[i].dateTime).getTime();
-                        if (dcTime <= tStart) {
-                            if (changes[i].driver && changes[i].driver.id) {
-                                matchedDriverId = changes[i].driver.id;
-                            }
+                        if (changes[i]._ts <= tStart) {
+                            matchedDriverId = changes[i].driverId;
                         } else {
                             break;
                         }
@@ -258,23 +280,20 @@ geotab.addin.fuelMonitor = function (api, state) {
                     }
                 }
 
-                // Fallback a Trip.driver si está presente y no es indeterminado
-                if (trip.driver && trip.driver.id && trip.driver.id !== "NoDriverId" && trip.driver.id !== "UnknownDriverId") {
-                    return trip.driver.id;
+                if (trip.driverId && trip.driverId !== "NoDriverId" && trip.driverId !== "UnknownDriverId") {
+                    return trip.driverId;
                 }
 
                 return "UNKNOWN";
             }
 
-            const validTrips = trips.filter(t => (t.distance || 0) >= MIN_TRIP_DISTANCE_KM);
-
+            // 4. Agrupar viajes por conductor y registrar activos
             const driverMap = {};
             const activeDeviceIds = new Set();
 
             validTrips.forEach(t => {
                 const resolvedDriverId = resolveDriverForTrip(t);
 
-                // Filtrar por conductor si hay selección individual
                 if (selectedId !== "ALL" && resolvedDriverId !== selectedId) {
                     return;
                 }
@@ -293,10 +312,10 @@ geotab.addin.fuelMonitor = function (api, state) {
                 }
 
                 driverMap[resolvedDriverId].trips.push(t);
-                driverMap[resolvedDriverId].totalDistanceKm += (t.distance || 0);
+                driverMap[resolvedDriverId].totalDistanceKm += t.distance;
 
-                if (t.device && t.device.id) {
-                    activeDeviceIds.add(t.device.id);
+                if (t.deviceId) {
+                    activeDeviceIds.add(t.deviceId);
                 }
             });
 
@@ -306,7 +325,7 @@ geotab.addin.fuelMonitor = function (api, state) {
                 return;
             }
 
-            // Consultar telemetría StatusData con ventana expandida para los vehículos involucrados
+            // 5. Consultar telemetría únicamente para los vehículos involucrados
             const deviceArray = Array.from(activeDeviceIds);
             let fuelCalls = deviceArray.map(devId => ["Get", {
                 typeName: "StatusData",
@@ -321,7 +340,7 @@ geotab.addin.fuelMonitor = function (api, state) {
             api.multiCall(fuelCalls, function (fuelResults) {
                 const deviceFuelDataMap = {};
                 deviceArray.forEach((devId, idx) => {
-                    deviceFuelDataMap[devId] = fuelResults[idx] || [];
+                    deviceFuelDataMap[devId] = prepareFuelData(fuelResults[idx] || []);
                 });
 
                 currentReportData = [];
@@ -332,9 +351,9 @@ geotab.addin.fuelMonitor = function (api, state) {
                     let validTripsWithCan = 0;
 
                     driverGroup.trips.forEach(trip => {
-                        const devFuelList = deviceFuelDataMap[trip.device.id] || [];
-                        if (devFuelList.length >= 2) {
-                            const tripFuel = getFuelForTimeRange(devFuelList, trip.start, trip.stop);
+                        const cleanFuelList = deviceFuelDataMap[trip.deviceId] || [];
+                        if (cleanFuelList.length >= 2) {
+                            const tripFuel = getFuelForTimeRange(cleanFuelList, trip.startTs, trip.stopTs);
                             if (tripFuel > 0) {
                                 totalFuelLiters += tripFuel;
                                 validTripsWithCan++;
@@ -364,56 +383,78 @@ geotab.addin.fuelMonitor = function (api, state) {
     }
 
     // =========================================================================
-    // 5. INTERPOLACIÓN Y CÁLCULO DE COMBUSTIBLE
+    // 5. INTERPOLACIÓN Y CÁLCULO MEDIANTE BÚSQUEDA BINARIA O(log N)
     // =========================================================================
 
-    function sortFuelData(data) {
-        return (data || []).sort((a, b) => new Date(a.dateTime).getTime() - new Date(b.dateTime).getTime());
+    function prepareFuelData(rawList) {
+        const cleanList = [];
+        if (!rawList || !Array.isArray(rawList)) return cleanList;
+
+        for (let i = 0; i < rawList.length; i++) {
+            const pt = rawList[i];
+            if (pt && pt.dateTime && typeof pt.data === 'number') {
+                cleanList.push({
+                    _ts: new Date(pt.dateTime).getTime(),
+                    data: pt.data
+                });
+            }
+        }
+        cleanList.sort((a, b) => a._ts - b._ts);
+        return cleanList;
     }
 
-    function getInterpolatedFuelValue(fuelDataList, targetTime) {
-        const target = new Date(targetTime).getTime();
-        const data = sortFuelData(fuelDataList);
+    function getInterpolatedFuelValue(cleanFuelList, targetTs) {
+        if (!cleanFuelList || cleanFuelList.length === 0) return null;
 
+        let low = 0;
+        let high = cleanFuelList.length - 1;
         let before = null;
         let after = null;
 
-        for (const point of data) {
-            const t = new Date(point.dateTime).getTime();
-            if (t <= target) {
-                before = point;
-            }
-            if (t >= target) {
-                after = point;
-                break;
+        // Búsqueda binaria para 'before'
+        while (low <= high) {
+            const mid = (low + high) >> 1;
+            if (cleanFuelList[mid]._ts <= targetTs) {
+                before = cleanFuelList[mid];
+                low = mid + 1;
+            } else {
+                high = mid - 1;
             }
         }
 
-        // Estricto: Si no existe punto anterior Y posterior en el rango expandido, descartar
-        if (!before || !after) {
-            return null;
+        // Búsqueda binaria para 'after'
+        low = 0;
+        high = cleanFuelList.length - 1;
+        while (low <= high) {
+            const mid = (low + high) >> 1;
+            if (cleanFuelList[mid]._ts >= targetTs) {
+                after = cleanFuelList[mid];
+                high = mid - 1;
+            } else {
+                low = mid + 1;
+            }
         }
 
-        const t1 = new Date(before.dateTime).getTime();
-        const t2 = new Date(after.dateTime).getTime();
+        if (!before || !after) return null;
+
+        const t1 = before._ts;
+        const t2 = after._ts;
 
         if (t1 === t2) return before.data;
 
-        const ratio = (target - t1) / (t2 - t1);
-        return before.data + ((after.data - before.data) * ratio);
+        const ratio = (targetTs - t1) / (t2 - t1);
+        return before.data + (after.data - before.data) * ratio;
     }
 
-    function getFuelForTimeRange(fuelDataList, startTime, stopTime) {
-        const fuelStart = getInterpolatedFuelValue(fuelDataList, startTime);
-        const fuelStop = getInterpolatedFuelValue(fuelDataList, stopTime);
+    function getFuelForTimeRange(cleanFuelList, startTs, stopTs) {
+        const fuelStart = getInterpolatedFuelValue(cleanFuelList, startTs);
+        const fuelStop = getInterpolatedFuelValue(cleanFuelList, stopTs);
 
         if (fuelStart === null || fuelStop === null) {
             return 0;
         }
 
         const diff = fuelStop - fuelStart;
-
-        // Descartar valores negativos (reinicios de contador) o nulos
         return diff > 0 ? diff : 0;
     }
 
