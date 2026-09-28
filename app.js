@@ -13,7 +13,7 @@ geotab.addin.fuelMonitor = function (api, state) {
     };
 
     // Umbral mínimo de distancia para filtrar micro-movimientos en conductores
-    const MIN_TRIP_DISTANCE_KM = 0.5;
+    const MIN_TRIP_DISTANCE_KM = 0;
 
     return {
         initialize: function (api, state, callback) {
@@ -150,7 +150,10 @@ geotab.addin.fuelMonitor = function (api, state) {
                     for (let i = 0; i < devices.length; i++) {
                         const device = devices[i];
                         const distKm = deviceDistanceMap[device.id] || 0;
-                        const fuelData = fuelResults[i] || [];
+                        const fuelData =
+sortFuelData(
+fuelResults[i] || []
+);
 
                         let fuelLiters = 0;
                         let hasCanBus = false;
@@ -170,7 +173,6 @@ geotab.addin.fuelMonitor = function (api, state) {
                         currentReportData.push({
                             id: device.id,
                             name: device.name,
-                            serialNumber: device.serialNumber || "N/D",
                             distanceKm: parseFloat(distKm.toFixed(2)),
                             fuelLiters: parseFloat(fuelLiters.toFixed(2)),
                             avgConsumption: parseFloat(avgConsumption.toFixed(2)),
@@ -245,8 +247,8 @@ geotab.addin.fuelMonitor = function (api, state) {
                 search: {
                     deviceId: devId,
                     diagnosticSearch: { id: DIAGNOSTICS.FUEL_USED },
-                    fromDate: fromDate,
-                    toDate: toDate
+                    fromDate: expandedFrom,
+                    toDate: expandedTo
                 }
             }]);
 
@@ -282,7 +284,6 @@ geotab.addin.fuelMonitor = function (api, state) {
                     currentReportData.push({
                         id: driverGroup.id,
                         name: driverGroup.name,
-                        serialNumber: "N/A",
                         distanceKm: parseFloat(dist.toFixed(2)),
                         fuelLiters: parseFloat(totalFuelLiters.toFixed(2)),
                         avgConsumption: parseFloat(avg.toFixed(2)),
@@ -297,27 +298,106 @@ geotab.addin.fuelMonitor = function (api, state) {
 
         }, showError);
     }
-
-    // Calcula el combustible gastado en la ventana temporal de un viaje
-    function getFuelForTimeRange(fuelDataList, startTimeStr, stopTimeStr) {
-        const tStart = new Date(startTimeStr).getTime();
-        const tStop = new Date(stopTimeStr).getTime();
-
-        const pointsInTrip = fuelDataList.filter(p => {
-            const ptTime = new Date(p.dateTime).getTime();
-            return ptTime >= tStart && ptTime <= tStop;
-        });
-
-        if (pointsInTrip.length >= 2) {
-            return pointsInTrip[pointsInTrip.length - 1].data - pointsInTrip[0].data;
-        } else if (fuelDataList.length >= 2) {
-            const startPt = fuelDataList.find(p => new Date(p.dateTime).getTime() >= tStart) || fuelDataList[0];
-            const endPt = [...fuelDataList].reverse().find(p => new Date(p.dateTime).getTime() <= tStop) || fuelDataList[fuelDataList.length - 1];
-            const diff = endPt.data - startPt.data;
-            return diff > 0 ? diff : 0;
-        }
-        return 0;
-    }
+//Bloque añadido
+    function sortFuelData(data) {
+return (data || []).sort(
+(a, b) =>
+new Date(a.dateTime).getTime() -
+new Date(b.dateTime).getTime()
+);
+}
+ 
+function getInterpolatedFuelValue(
+fuelDataList,
+targetTime
+) {
+ 
+const target =
+new Date(targetTime).getTime();
+ 
+const data =
+sortFuelData(fuelDataList);
+ 
+let before = null;
+let after = null;
+ 
+for (const point of data) {
+ 
+const t =
+new Date(point.dateTime)
+.getTime();
+ 
+if (t <= target) {
+before = point;
+}
+ 
+if (t >= target) {
+after = point;
+break;
+}
+}
+ 
+if (!before && !after)
+return null;
+ 
+if (!before)
+return after.data;
+ 
+if (!after)
+return before.data;
+ 
+const t1 =
+new Date(before.dateTime)
+.getTime();
+ 
+const t2 =
+new Date(after.dateTime)
+.getTime();
+ 
+if (t1 === t2)
+return before.data;
+ 
+const ratio =
+(target - t1) /
+(t2 - t1);
+ 
+return before.data +
+((after.data - before.data) * ratio);
+}
+    
+    // Calcula el combustible gastado en la ventana temporal de un viaje, CAMBIO REALIZADO
+    function getFuelForTimeRange(
+fuelDataList,
+startTime,
+stopTime
+) {
+ 
+const fuelStart =
+getInterpolatedFuelValue(
+fuelDataList,
+startTime
+);
+ 
+const fuelStop =
+getInterpolatedFuelValue(
+fuelDataList,
+stopTime
+);
+ 
+if (
+fuelStart === null ||
+fuelStop === null
+) {
+return 0;
+}
+ 
+const diff =
+fuelStop - fuelStart;
+ 
+return diff > 0
+? diff
+: 0;
+}
 
     // =========================================================================
     // 5. RENDERIZADO (TABLA Y GRÁFICO)
@@ -338,7 +418,9 @@ geotab.addin.fuelMonitor = function (api, state) {
                 <thead>
                     <tr>
                         <th>${mode === "Device" ? "Vehículo / Activo" : "Conductor"}</th>
-                        ${mode === "Device" ? "<th>Nº Serie / VIN</th>" : "<th>Viajes Analizados</th>"}
+                        ${mode === "User"
+? "<th>Viajes Analizados</th>"
+: ""}
                         <th style="text-align: right;">Distancia (km)</th>
                         <th style="text-align: right;">Combustible (L)</th>
                         <th style="text-align: right;">Consumo Medio (L/100km)</th>
@@ -365,7 +447,9 @@ geotab.addin.fuelMonitor = function (api, state) {
             html += `
                 <tr ${rowStyle}>
                     <td style="font-weight: 600;">${escapeHtml(row.name)}</td>
-                    <td>${mode === "Device" ? escapeHtml(row.serialNumber) : row.tripsCount}</td>
+                    <td>${mode === "User"
+? `<td>${row.tripsCount}</td>`
+: ""}</td>
                     <td style="text-align: right;">${row.distanceKm.toLocaleString('es-ES')}</td>
                     <td style="text-align: right;">${row.fuelLiters.toLocaleString('es-ES')}</td>
                     <td style="text-align: right; ${textAlertStyle}">${row.avgConsumption.toLocaleString('es-ES')}</td>
@@ -444,12 +528,15 @@ geotab.addin.fuelMonitor = function (api, state) {
 
         let csvContent = "\uFEFF";
         csvContent += mode === "Device" 
-            ? "Vehículo;Nº Serie;Distancia (km);Combustible (L);Consumo Medio (L/100km);Estado\n"
+            ? "Vehículo;Distancia (km);Combustible (L);Consumo Medio (L/100km);Estado\n"
             : "Conductor;Viajes Analizados;Distancia (km);Combustible (L);Consumo Medio (L/100km);Estado\n";
 
         currentReportData.forEach(row => {
             const status = !row.hasCanBus ? "Sin Datos CAN" : (row.avgConsumption > threshold ? "Excede Umbral" : "Normal");
-            const col2 = mode === "Device" ? row.serialNumber : row.tripsCount;
+            const col2 =
+mode === "User"
+? row.tripsCount
+: "";
             
             const distStr = row.distanceKm.toString().replace('.', ',');
             const fuelStr = row.fuelLiters.toString().replace('.', ',');
