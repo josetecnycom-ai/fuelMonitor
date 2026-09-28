@@ -1,576 +1,521 @@
-geotab.addin.fuelMonitor = function (outerApi, outerState) {
+/**
+ * Add-in de Monitorización de Consumo de Combustible para MyGeotab
+ * Archivo: app.js
+ */
 
-    let currentApi = outerApi; 
+geotab.addin.fuelMonitor = function (api, state) {
     let chartInstance = null;
-    let reportDataForExport = [];
+    let currentReportData = [];
 
-    const modeRadios     = document.getElementsByName('searchMode');
-    const entitySelect   = document.getElementById('entitySelect');
-    const dateFrom       = document.getElementById('dateFrom');
-    const dateTo         = document.getElementById('dateTo');
-    const thresholdInput = document.getElementById('thresholdLimit');
-    const btnFetch       = document.getElementById('btn-fetch-data');
-    const btnExport      = document.getElementById('btn-export-excel');
-    const panel          = document.getElementById('results-panel');
-    const chartWrap      = document.getElementById('chartWrapper');
+    // Identificadores de diagnósticos estándar de Geotab
+    const DIAGNOSTICS = {
+        FUEL_USED: "DiagnosticTotalFuelUsedId",
+        ODOMETER: "DiagnosticOdometerAdjustmentId"
+    };
 
-    // Extraer Nombre y Apellidos
-    function getDriverDisplayName(user) {
-        if (!user) return "Conductor Desconocido";
-        let fullName = "";
-        if (user.firstName || user.lastName) {
-            fullName = `${user.firstName || ''} ${user.lastName || ''}`.trim();
+    // Umbral mínimo de distancia para procesar viajes de conductores (evita anomalías CAN en micro-trayectos)
+    const MIN_TRIP_DISTANCE_KM = 2.0;
+
+    return {
+        initialize: function (api, state, callback) {
+            initDefaultDates();
+            bindEventListeners(api);
+            populateEntitySelect(api, "Device");
+            callback();
+        },
+        focus: function (api, state) {
+            // Método invocado al entrar en el Add-in
+        },
+        blur: function (api, state) {
+            // Método invocado al salir del Add-in
         }
-        if (!fullName) {
-            fullName = user.name || user.id || "Sin Nombre";
-        }
-        if (fullName.startsWith("#E_")) {
-            fullName = user.name || "Conductor " + user.id;
-        }
-        return fullName;
+    };
+
+    // =========================================================================
+    // 1. INICIALIZACIÓN Y EVENTOS
+    // =========================================================================
+
+    function initDefaultDates() {
+        const today = new Date();
+        const firstDayOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+
+        document.getElementById("dateFrom").value = firstDayOfMonth.toISOString().split("T")[0];
+        document.getElementById("dateTo").value = today.toISOString().split("T")[0];
     }
 
-    // Badge HTML generado con CSS Inline
-    function getConsumptionBadge(avg, threshold) {
-        if (avg <= 0 || isNaN(avg)) {
-            return `<span style="font-weight:600; color:#64748b;">N/D</span>`;
-        }
-        const isHigh = avg > threshold;
-        const bg = isHigh ? '#fef2f2' : '#f0fdf4';
-        const color = isHigh ? '#dc2626' : '#16a34a';
-        const border = isHigh ? '#fca5a5' : '#86efac';
-
-        return `<span style="background-color: ${bg}; color: ${color}; border: 1px solid ${border}; padding: 3px 8px; border-radius: 4px; font-weight: 700; font-size: 12px; display: inline-block;">
-            ${avg.toFixed(2)} L/100km
-        </span>`;
-    }
-
-    // Interpolación lineal del acumulado de combustible en un instante exacto (ms)
-    function getInterpolatedFuel(readings, targetTimeMs) {
-        if (!readings || readings.length === 0) return null;
-
-        const tFirst = new Date(readings[0].dateTime).getTime();
-        const tLast = new Date(readings[readings.length - 1].dateTime).getTime();
-
-        if (targetTimeMs <= tFirst) return readings[0].data;
-        if (targetTimeMs >= tLast) return readings[readings.length - 1].data;
-
-        let prev = readings[0];
-        for (let i = 0; i < readings.length; i++) {
-            const rTime = new Date(readings[i].dateTime).getTime();
-            if (rTime === targetTimeMs) return readings[i].data;
-            if (rTime > targetTimeMs) {
-                const next = readings[i];
-                const prevTime = new Date(prev.dateTime).getTime();
-                const factor = (targetTimeMs - prevTime) / (rTime - prevTime);
-                return prev.data + factor * (next.data - prev.data);
-            }
-            prev = readings[i];
-        }
-        return readings[readings.length - 1].data;
-    }
-
-    function directCall(method, params, successCallback, errorCallback) {
-        currentApi.getSession(function(credentials, server) {
-            var url = 'https://' + (server || 'my.geotab.com') + '/apiv1';
-            fetch(url, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ method: method, params: Object.assign({}, params, { credentials: credentials }) })
-            })
-            .then(res => res.json())
-            .then(json => json.error ? (errorCallback && errorCallback(json.error)) : (successCallback && successCallback(json.result)))
-            .catch(err => errorCallback && errorCallback(err));
-        });
-    }
-
-    function directMultiCall(callsArray, successCallback, errorCallback) {
-        currentApi.getSession(function(credentials, server) {
-            var url = 'https://' + (server || 'my.geotab.com') + '/apiv1';
-            fetch(url, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    method: "ExecuteMultiCall",
-                    params: { calls: callsArray.map(call => ({ method: call[0], params: call[1] })), credentials: credentials }
-                })
-            })
-            .then(res => res.json())
-            .then(json => json.error ? (errorCallback && errorCallback(json.error)) : (successCallback && successCallback(json.result)))
-            .catch(err => errorCallback && errorCallback(err));
-        });
-    }
-
-    function loadEntityList() {
-        const mode = document.querySelector('input[name="searchMode"]:checked').value;
-        entitySelect.innerHTML = '<option value="ALL">Cargando...</option>';
-        entitySelect.disabled = true;
-
-        var searchParam = mode === 'User' ? { isDriver: true } : {};
-
-        directCall('Get', { typeName: mode, search: searchParam }, function(entities) {
-            entitySelect.disabled = false;
-            entitySelect.innerHTML = '';
-
-            var optAll = document.createElement('option');
-            optAll.value = 'ALL';
-            optAll.textContent = mode === 'Device' ? '-- TODOS LOS VEHÍCULOS --' : '-- TODOS LOS CONDUCTORES --';
-            entitySelect.appendChild(optAll);
-
-            var items = (entities || []).map(e => ({
-                id: e.id,
-                name: mode === 'User' ? getDriverDisplayName(e) : (e.name || e.id)
-            }));
-
-            items.sort((a, b) => a.name.localeCompare(b.name));
-
-            items.forEach(item => {
-                var opt = document.createElement('option');
-                opt.value = item.id;
-                opt.textContent = item.name;
-                entitySelect.appendChild(opt);
+    function bindEventListeners(api) {
+        // Cambio de modo (Vehículos vs Conductores)
+        document.querySelectorAll('input[name="searchMode"]').forEach(radio => {
+            radio.addEventListener("change", (e) => {
+                populateEntitySelect(api, e.target.value);
             });
-        }, function(error) {
-            console.error('Error al cargar lista:', error);
-            entitySelect.innerHTML = '<option value="ALL">-- Error al cargar --</option>';
-            entitySelect.disabled = false;
+        });
+
+        // Botón Generar Informe
+        document.getElementById("btn-fetch-data").addEventListener("click", () => {
+            generateReport(api);
+        });
+
+        // Botón Exportar Excel
+        document.getElementById("btn-export-excel").addEventListener("click", () => {
+            exportToCSV();
         });
     }
 
-    function loadReport() {
-        if (!dateFrom.value || !dateTo.value) {
-            panel.innerHTML = '<div style="background:#ffffff; border:1px solid #dce2e6; padding:16px; border-radius:6px; color:#b91c1c;">Por favor selecciona las fechas "Desde" y "Hasta".</div>';
+    function populateEntitySelect(api, mode) {
+        const select = document.getElementById("entitySelect");
+        select.innerHTML = '<option value="ALL">-- TODOS --</option>';
+
+        if (mode === "Device") {
+            api.call("Get", { typeName: "Device" }, function (devices) {
+                devices.sort((a, b) => a.name.localeCompare(b.name));
+                devices.forEach(d => {
+                    const opt = document.createElement("option");
+                    opt.value = d.id;
+                    opt.textContent = d.name;
+                    select.appendChild(opt);
+                });
+            }, showError);
+        } else {
+            api.call("Get", { typeName: "User", search: { isDriver: true } }, function (drivers) {
+                drivers.sort((a, b) => (a.name || a.name).localeCompare(b.name || b.name));
+                drivers.forEach(u => {
+                    const opt = document.createElement("option");
+                    opt.value = u.id;
+                    opt.textContent = `${u.firstName || ''} ${u.lastName || ''}`.trim() || u.name;
+                    select.appendChild(opt);
+                });
+            }, showError);
+        }
+    }
+
+    // =========================================================================
+    // 2. ORQUESTACIÓN DE INFORMES
+    // =========================================================================
+
+    function generateReport(api) {
+        const mode = document.querySelector('input[name="searchMode"]:checked').value;
+        const selectedEntityId = document.getElementById("entitySelect").value;
+        const dateFromVal = document.getElementById("dateFrom").value;
+        const dateToVal = document.getElementById("dateTo").value;
+
+        if (!dateFromVal || !dateToVal) {
+            alert("Por favor, selecciona un rango de fechas válido.");
             return;
         }
 
-        const mode = document.querySelector('input[name="searchMode"]:checked').value;
-        const selectedId = entitySelect.value;
-        const threshold = parseFloat(thresholdInput.value) || 30.0;
-        const fromDate = new Date(dateFrom.value + "T00:00:00Z").toISOString();
-        const toDate = new Date(dateTo.value + "T23:59:59Z").toISOString();
+        const fromDate = new Date(dateFromVal + "T00:00:00.000Z").toISOString();
+        const toDate = new Date(dateToVal + "T23:59:59.999Z").toISOString();
 
-        panel.innerHTML = '<div style="background:#ffffff; border:1px solid #dce2e6; padding:16px; border-radius:6px;"><p style="margin:0;">⏳ Procesando datos de telemetría... Por favor espera.</p></div>';
-        btnExport.style.display = 'none';
-        chartWrap.style.display = 'none';
-        reportDataForExport = [];
+        showLoading();
 
-        if (mode === 'Device') {
-            if (selectedId === 'ALL') {
-                processAllVehicles(fromDate, toDate, threshold);
-            } else {
-                processSingleVehicle(selectedId, entitySelect.options[entitySelect.selectedIndex].text, fromDate, toDate, threshold);
-            }
+        if (mode === "Device") {
+            processVehiclesReport(api, selectedEntityId, fromDate, toDate);
         } else {
-            if (selectedId === 'ALL') {
-                processAllDrivers(fromDate, toDate, threshold);
-            } else {
-                processSingleDriver(selectedId, entitySelect.options[entitySelect.selectedIndex].text, fromDate, toDate, threshold);
-            }
+            processDriversReport(api, selectedEntityId, fromDate, toDate);
         }
     }
 
-    // ─── PROCESO: VEHÍCULOS ───────────────────────────────────────────────────
-    function processAllVehicles(fromDate, toDate, threshold) {
-        directCall('Get', { typeName: 'Device' }, function(devices) {
+    // =========================================================================
+    // 3. CÁLCULO DE CONSUMO POR VEHÍCULO
+    // =========================================================================
+
+    function processVehiclesReport(api, selectedId, fromDate, toDate) {
+        const deviceSearch = selectedId === "ALL" ? {} : { id: selectedId };
+
+        api.call("Get", { typeName: "Device", search: deviceSearch }, function (devices) {
             if (!devices || devices.length === 0) {
-                panel.innerHTML = '<div style="background:#ffffff; border:1px solid #dce2e6; padding:16px; border-radius:6px;"><p style="margin:0;">No se encontraron vehículos.</p></div>';
+                renderEmptyResults("No se encontraron vehículos.");
                 return;
             }
 
-            var calls = [];
-            devices.forEach(function(dev) {
-                calls.push(['Get', {
-                    typeName: 'StatusData',
-                    search: { deviceSearch: { id: dev.id }, diagnosticSearch: { id: 'DiagnosticOdometerAdjustmentId' }, fromDate: fromDate, toDate: toDate }
+            let calls = [];
+            devices.forEach(device => {
+                // Petición Odómetro
+                calls.push(["Get", {
+                    typeName: "StatusData",
+                    search: {
+                        deviceId: device.id,
+                        diagnosticSearch: { id: DIAGNOSTICS.ODOMETER },
+                        fromDate: fromDate,
+                        toDate: toDate
+                    }
                 }]);
-                calls.push(['Get', {
-                    typeName: 'StatusData',
-                    search: { deviceSearch: { id: dev.id }, diagnosticSearch: { id: 'DiagnosticTotalFuelUsedId' }, fromDate: fromDate, toDate: toDate }
+                // Petición Combustible Total
+                calls.push(["Get", {
+                    typeName: "StatusData",
+                    search: {
+                        deviceId: device.id,
+                        diagnosticSearch: { id: DIAGNOSTICS.FUEL_USED },
+                        fromDate: fromDate,
+                        toDate: toDate
+                    }
                 }]);
             });
 
-            directMultiCall(calls, function(results) {
-                let tableHtml = `
-                    <div style="background: #ffffff; border: 1px solid #dce2e6; border-radius: 6px; padding: 16px; margin-top: 16px;">
-                        <h3 style="margin: 0 0 12px 0; font-size: 15px; color: #2b537d;">Resumen Global de Vehículos</h3>
-                        <table class="fuel-table">
-                            <thead>
-                                <tr>
-                                    <th>Vehículo</th>
-                                    <th>Distancia (Km)</th>
-                                    <th>Combustible (L)</th>
-                                    <th>Consumo Medio</th>
-                                </tr>
-                            </thead>
-                            <tbody>`;
+            api.multiCall(calls, function (results) {
+                currentReportData = [];
 
-                const chartLabels = [], chartData = [];
+                for (let i = 0; i < devices.length; i++) {
+                    const device = devices[i];
+                    const odoData = results[i * 2] || [];
+                    const fuelData = results[i * 2 + 1] || [];
 
-                devices.forEach((dev, index) => {
-                    const odoData = results[index * 2] || [];
-                    const fuelData = results[index * 2 + 1] || [];
+                    const metrics = calculateMetricsFromStatusData(odoData, fuelData);
 
-                    let distanceKm = 0, fuelLiters = 0, avg = 0;
-
-                    if (odoData.length >= 2) {
-                        distanceKm = (odoData[odoData.length - 1].data - odoData[0].data) / 1000;
-                    }
-                    if (fuelData.length >= 2) {
-                        fuelLiters = fuelData[fuelData.length - 1].data - fuelData[0].data;
-                    }
-
-                    if (distanceKm > 0 && fuelLiters >= 0) {
-                        avg = (fuelLiters / distanceKm) * 100;
-                    }
-
-                    if (distanceKm > 0 || fuelLiters > 0) {
-                        tableHtml += `
-                            <tr>
-                                <td><strong>${dev.name}</strong></td>
-                                <td>${distanceKm.toFixed(2)} km</td>
-                                <td>${fuelLiters.toFixed(2)} L</td>
-                                <td>${getConsumptionBadge(avg, threshold)}</td>
-                            </tr>`;
-
-                        reportDataForExport.push({
-                            Vehiculo: dev.name,
-                            Distancia_Km: distanceKm.toFixed(2),
-                            Combustible_L: fuelLiters.toFixed(2),
-                            Consumo_Medio: avg > 0 ? avg.toFixed(2) : 'N/D'
-                        });
-
-                        if (avg > 0) {
-                            chartLabels.push(dev.name);
-                            chartData.push(avg.toFixed(2));
-                        }
-                    }
-                });
-
-                tableHtml += `</tbody></table></div>`;
-
-                if (reportDataForExport.length > 0) {
-                    panel.innerHTML = tableHtml;
-                    btnExport.style.display = 'inline-flex';
-                    if (chartLabels.length > 0) {
-                        renderBarChart(chartLabels, chartData, 'Consumo Medio (L/100km)');
-                    }
-                } else {
-                    panel.innerHTML = '<div style="background:#ffffff; border:1px solid #dce2e6; padding:16px; border-radius:6px;"><p style="margin:0;">No se encontraron registros de consumo en las fechas seleccionadas.</p></div>';
-                }
-            });
-        });
-    }
-
-    function processSingleVehicle(deviceId, deviceName, fromDate, toDate, threshold) {
-        var calls = [
-            ['Get', { typeName: 'StatusData', search: { deviceSearch: { id: deviceId }, diagnosticSearch: { id: 'DiagnosticOdometerAdjustmentId' }, fromDate: fromDate, toDate: toDate } }],
-            ['Get', { typeName: 'StatusData', search: { deviceSearch: { id: deviceId }, diagnosticSearch: { id: 'DiagnosticTotalFuelUsedId' }, fromDate: fromDate, toDate: toDate } }]
-        ];
-
-        directMultiCall(calls, function(results) {
-            const odoData = results[0] || [];
-            const fuelData = results[1] || [];
-
-            if (!odoData.length || !fuelData.length) {
-                panel.innerHTML = '<div style="background:#ffffff; border:1px solid #dce2e6; padding:16px; border-radius:6px;"><p style="margin:0;">No hay suficientes datos registrados para este vehículo.</p></div>';
-                return;
-            }
-
-            const distanceKm = (odoData[odoData.length - 1].data - odoData[0].data) / 1000;
-            const fuelLiters = fuelData[fuelData.length - 1].data - fuelData[0].data;
-            const avg = distanceKm > 0 ? (fuelLiters / distanceKm) * 100 : 0;
-
-            panel.innerHTML = `
-                <div style="background:#ffffff; border:1px solid #dce2e6; border-radius:6px; padding:16px; margin-top:16px;">
-                    <h3 style="margin:0 0 12px 0; color:#2b537d;">Vehículo: ${deviceName}</h3>
-                    <div style="display: flex; gap: 30px; margin-top: 10px;">
-                        <div><span style="font-size:11px; color:#5a6a75; font-weight:700; text-transform:uppercase;">Distancia Recorrida</span><br><strong style="font-size:16px;">${distanceKm.toFixed(2)} km</strong></div>
-                        <div><span style="font-size:11px; color:#5a6a75; font-weight:700; text-transform:uppercase;">Combustible Consumido</span><br><strong style="font-size:16px;">${fuelLiters.toFixed(2)} Litros</strong></div>
-                        <div><span style="font-size:11px; color:#5a6a75; font-weight:700; text-transform:uppercase;">Consumo Medio</span><br>${getConsumptionBadge(avg, threshold)}</div>
-                    </div>
-                </div>`;
-
-            reportDataForExport.push({
-                Vehiculo: deviceName,
-                Distancia_Km: distanceKm.toFixed(2),
-                Combustible_L: fuelLiters.toFixed(2),
-                Consumo_Medio: avg.toFixed(2)
-            });
-
-            btnExport.style.display = 'inline-flex';
-            renderLineChart(fuelData, 'Evolución de Consumo Acumulado (Litros)');
-        });
-    }
-
-    // ─── PROCESO: CONDUCTORES ─────────────────────────────────────────────────
-    function processAllDrivers(fromDate, toDate, threshold) {
-        directCall('Get', { typeName: 'User', search: { isDriver: true } }, function(drivers) {
-            directCall('Get', { typeName: 'Trip', search: { fromDate: fromDate, toDate: toDate } }, function(trips) {
-
-                if (!trips || trips.length === 0) {
-                    panel.innerHTML = '<div style="background:#ffffff; border:1px solid #dce2e6; padding:16px; border-radius:6px;"><p style="margin:0;">No hay trayectos registrados en el periodo seleccionado.</p></div>';
-                    return;
-                }
-
-                const driverMap = {};
-                (drivers || []).forEach(d => {
-                    driverMap[d.id] = {
-                        name: getDriverDisplayName(d),
-                        distance: 0,
-                        tripsCount: 0,
-                        devicesUsed: new Set()
-                    };
-                });
-
-                trips.forEach(t => {
-                    var driverId = t.driver ? t.driver.id : null;
-                    if (driverId && driverMap[driverId]) {
-                        driverMap[driverId].distance += (t.distance || 0);
-                        driverMap[driverId].tripsCount++;
-                        if (t.device && t.device.id) driverMap[driverId].devicesUsed.add(t.device.id);
-                    }
-                });
-
-                const uniqueDeviceIds = Array.from(new Set(trips.map(t => t.device ? t.device.id : null).filter(Boolean)));
-
-                if (uniqueDeviceIds.length === 0) {
-                    panel.innerHTML = '<div style="background:#ffffff; border:1px solid #dce2e6; padding:16px; border-radius:6px;"><p style="margin:0;">No se encontraron vehículos asociados a los conductores.</p></div>';
-                    return;
-                }
-
-                var fuelCalls = uniqueDeviceIds.map(devId => ['Get', {
-                    typeName: 'StatusData',
-                    search: { deviceSearch: { id: devId }, diagnosticSearch: { id: 'DiagnosticTotalFuelUsedId' }, fromDate: fromDate, toDate: toDate }
-                }]);
-
-                directMultiCall(fuelCalls, function(fuelResults) {
-                    const deviceFuelMap = {};
-                    uniqueDeviceIds.forEach((devId, idx) => { deviceFuelMap[devId] = fuelResults[idx] || []; });
-
-                    Object.keys(driverMap).forEach(dId => {
-                        let totalFuel = 0;
-                        const driverTrips = trips.filter(t => t.driver && t.driver.id === dId);
-
-                        driverTrips.forEach(t => {
-                            if (!t.device || !deviceFuelMap[t.device.id]) return;
-                            const readings = deviceFuelMap[t.device.id];
-                            if (readings.length === 0) return;
-
-                            const tStart = new Date(t.start).getTime();
-                            const tStop = new Date(t.stop).getTime();
-
-                            const fuelStart = getInterpolatedFuel(readings, tStart);
-                            const fuelStop = getInterpolatedFuel(readings, tStop);
-
-                            if (fuelStart !== null && fuelStop !== null && fuelStop >= fuelStart) {
-                                totalFuel += (fuelStop - fuelStart);
-                            }
-                        });
-
-                        driverMap[dId].fuel = totalFuel;
+                    currentReportData.push({
+                        id: device.id,
+                        name: device.name,
+                        serialNumber: device.serialNumber || "N/D",
+                        distanceKm: metrics.distanceKm,
+                        fuelLiters: metrics.fuelLiters,
+                        avgConsumption: metrics.avgConsumption,
+                        hasCanBus: metrics.hasCanBus,
+                        tripsCount: "N/A"
                     });
+                }
 
-                    let tableHtml = `
-                        <div style="background: #ffffff; border: 1px solid #dce2e6; border-radius: 6px; padding: 16px; margin-top: 16px;">
-                            <h3 style="margin: 0 0 12px 0; font-size: 15px; color: #2b537d;">Resumen Global de Conductores</h3>
-                            <table class="fuel-table">
-                                <thead>
-                                    <tr>
-                                        <th>Conductor</th>
-                                        <th>Nº Viajes</th>
-                                        <th>Distancia (Km)</th>
-                                        <th>Combustible (L)</th>
-                                        <th>Consumo Medio</th>
-                                    </tr>
-                                </thead>
-                                <tbody>`;
-
-                    const chartLabels = [], chartData = [];
-
-                    Object.keys(driverMap).forEach(id => {
-                        const d = driverMap[id];
-                        if (d.tripsCount > 0) {
-                            const avg = d.distance > 0 ? (d.fuel / d.distance) * 100 : 0;
-
-                            tableHtml += `
-                                <tr>
-                                    <td><strong>${d.name}</strong></td>
-                                    <td>${d.tripsCount}</td>
-                                    <td>${d.distance.toFixed(2)} km</td>
-                                    <td>${d.fuel > 0 ? d.fuel.toFixed(2) + ' L' : '0 L'}</td>
-                                    <td>${getConsumptionBadge(avg, threshold)}</td>
-                                </tr>`;
-
-                            reportDataForExport.push({
-                                Conductor: d.name,
-                                Viajes: d.tripsCount,
-                                Distancia_Km: d.distance.toFixed(2),
-                                Combustible_L: d.fuel.toFixed(2),
-                                Consumo_Medio: avg > 0 ? avg.toFixed(2) : 'N/D'
-                            });
-
-                            if (avg > 0) {
-                                chartLabels.push(d.name);
-                                chartData.push(avg.toFixed(2));
-                            }
-                        }
-                    });
-
-                    tableHtml += `</tbody></table></div>`;
-
-                    if (reportDataForExport.length > 0) {
-                        panel.innerHTML = tableHtml;
-                        btnExport.style.display = 'inline-flex';
-                        if (chartLabels.length > 0) {
-                            renderBarChart(chartLabels, chartData, 'Consumo Medio (L/100km) por Conductor');
-                        }
-                    } else {
-                        panel.innerHTML = '<div style="background:#ffffff; border:1px solid #dce2e6; padding:16px; border-radius:6px;"><p style="margin:0;">No se encontraron registros de viajes o combustible para los conductores.</p></div>';
-                    }
-                });
-            });
-        });
+                renderTable("Device");
+                renderChart();
+            }, showError);
+        }, showError);
     }
 
-    function processSingleDriver(driverId, driverName, fromDate, toDate, threshold) {
-        directCall('Get', {
-            typeName: 'Trip',
-            search: { userSearch: { id: driverId }, fromDate: fromDate, toDate: toDate }
-        }, function(trips) {
+    function calculateMetricsFromStatusData(odoData, fuelData) {
+        if (odoData.length < 2 || fuelData.length < 2) {
+            return { distanceKm: 0, fuelLiters: 0, avgConsumption: 0, hasCanBus: false };
+        }
+
+        const odoStart = odoData[0].data;
+        const odoEnd = odoData[odoData.length - 1].data;
+        
+        const fuelStart = fuelData[0].data;
+        const fuelEnd = fuelData[fuelData.length - 1].data;
+
+        // Odómetro en Geotab suele venir en metros
+        let distanceKm = (odoEnd - odoStart) / 1000.0;
+        let fuelLiters = fuelEnd - fuelStart;
+
+        // Validación de coherencia
+        if (distanceKm <= 0 || fuelLiters < 0) {
+            return { distanceKm: Math.max(0, distanceKm), fuelLiters: 0, avgConsumption: 0, hasCanBus: true };
+        }
+
+        let avgConsumption = (fuelLiters / distanceKm) * 100.0;
+
+        return {
+            distanceKm: parseFloat(distanceKm.toFixed(2)),
+            fuelLiters: parseFloat(fuelLiters.toFixed(2)),
+            avgConsumption: parseFloat(avgConsumption.toFixed(2)),
+            hasCanBus: true
+        };
+    }
+
+    // =========================================================================
+    // 4. CÁLCULO DE CONSUMO POR CONDUCTOR (CORRELACIÓN VÍA TRIPS)
+    // =========================================================================
+
+    function processDriversReport(api, selectedId, fromDate, toDate) {
+        const tripSearch = {
+            fromDate: fromDate,
+            toDate: toDate
+        };
+
+        if (selectedId !== "ALL") {
+            tripSearch.driverSearch = { id: selectedId };
+        }
+
+        api.call("Get", { typeName: "Trip", search: tripSearch }, function (trips) {
             if (!trips || trips.length === 0) {
-                panel.innerHTML = '<div style="background:#ffffff; border:1px solid #dce2e6; padding:16px; border-radius:6px;"><p style="margin:0;">No hay viajes para este conductor.</p></div>';
+                renderEmptyResults("No se registraron viajes para los criterios seleccionados.");
                 return;
             }
 
-            let totalDistance = 0;
-            const uniqueDeviceIds = new Set();
+            // Filtrar micro-trayectos y asignar conductor "Sin Identificar" si aplica
+            const validTrips = trips.filter(t => t.distance >= MIN_TRIP_DISTANCE_KM);
 
-            trips.forEach(t => {
-                totalDistance += (t.distance || 0);
-                if (t.device && t.device.id) uniqueDeviceIds.add(t.device.id);
+            if (validTrips.length === 0) {
+                renderEmptyResults(`Todos los viajes registrados son inferiores a ${MIN_TRIP_DISTANCE_KM} km.`);
+                return;
+            }
+
+            // Agrupar viajes por conductor
+            const driverMap = {};
+            validTrips.forEach(t => {
+                const driverId = (t.driver && t.driver.id !== "NoDriverId") ? t.driver.id : "UNKNOWN";
+                const driverName = (t.driver && t.driver.name) ? t.driver.name : "Conductor No Identificado";
+
+                if (!driverMap[driverId]) {
+                    driverMap[driverId] = {
+                        id: driverId,
+                        name: driverName,
+                        trips: [],
+                        totalDistanceKm: 0
+                    };
+                }
+                driverMap[driverId].trips.push(t);
+                driverMap[driverId].totalDistanceKm += t.distance;
             });
 
-            var fuelCalls = Array.from(uniqueDeviceIds).map(devId => ['Get', {
-                typeName: 'StatusData',
-                search: { deviceSearch: { id: devId }, diagnosticSearch: { id: 'DiagnosticTotalFuelUsedId' }, fromDate: fromDate, toDate: toDate }
-            }]);
+            // Preparar multicall para consultar combustible consumido por cada viaje
+            let calls = [];
+            const driverKeys = Object.keys(driverMap);
 
-            directMultiCall(fuelCalls, function(fuelResults) {
-                const deviceFuelMap = {};
-                Array.from(uniqueDeviceIds).forEach((devId, idx) => { deviceFuelMap[devId] = fuelResults[idx] || []; });
-
-                let totalFuel = 0;
-                trips.forEach(t => {
-                    if (!t.device || !deviceFuelMap[t.device.id]) return;
-                    const readings = deviceFuelMap[t.device.id];
-                    if (readings.length === 0) return;
-
-                    const tStart = new Date(t.start).getTime();
-                    const tStop = new Date(t.stop).getTime();
-
-                    const fuelStart = getInterpolatedFuel(readings, tStart);
-                    const fuelStop = getInterpolatedFuel(readings, tStop);
-
-                    if (fuelStart !== null && fuelStop !== null && fuelStop >= fuelStart) {
-                        totalFuel += (fuelStop - fuelStart);
-                    }
+            driverKeys.forEach(dKey => {
+                driverMap[dKey].trips.forEach(trip => {
+                    calls.push(["Get", {
+                        typeName: "StatusData",
+                        search: {
+                            deviceId: trip.device.id,
+                            diagnosticSearch: { id: DIAGNOSTICS.FUEL_USED },
+                            fromDate: trip.start,
+                            toDate: trip.stop
+                        }
+                    }]);
                 });
-
-                const avg = totalDistance > 0 ? (totalFuel / totalDistance) * 100 : 0;
-
-                panel.innerHTML = `
-                    <div style="background:#ffffff; border:1px solid #dce2e6; border-radius:6px; padding:16px; margin-top:16px;">
-                        <h3 style="margin:0 0 12px 0; color:#2b537d;">Conductor: ${driverName}</h3>
-                        <div style="display: flex; gap: 30px; margin-top: 10px;">
-                            <div><span style="font-size:11px; color:#5a6a75; font-weight:700; text-transform:uppercase;">Viajes</span><br><strong style="font-size:16px;">${trips.length}</strong></div>
-                            <div><span style="font-size:11px; color:#5a6a75; font-weight:700; text-transform:uppercase;">Distancia Total</span><br><strong style="font-size:16px;">${totalDistance.toFixed(2)} km</strong></div>
-                            <div><span style="font-size:11px; color:#5a6a75; font-weight:700; text-transform:uppercase;">Combustible Consumido</span><br><strong style="font-size:16px;">${totalFuel.toFixed(2)} Litros</strong></div>
-                            <div><span style="font-size:11px; color:#5a6a75; font-weight:700; text-transform:uppercase;">Consumo Medio</span><br>${getConsumptionBadge(avg, threshold)}</div>
-                        </div>
-                    </div>`;
-
-                reportDataForExport.push({
-                    Conductor: driverName,
-                    Viajes: trips.length,
-                    Distancia_Km: totalDistance.toFixed(2),
-                    Combustible_L: totalFuel.toFixed(2),
-                    Consumo_Medio: avg.toFixed(2)
-                });
-
-                btnExport.style.display = 'inline-flex';
             });
-        });
+
+            api.multiCall(calls, function (fuelResults) {
+                currentReportData = [];
+                let callIdx = 0;
+
+                driverKeys.forEach(dKey => {
+                    const driverGroup = driverMap[dKey];
+                    let driverFuelLiters = 0;
+                    let validFuelTripsCount = 0;
+
+                    driverGroup.trips.forEach(trip => {
+                        const fuelData = fuelResults[callIdx] || [];
+                        callIdx++;
+
+                        if (fuelData.length >= 2) {
+                            const fStart = fuelData[0].data;
+                            const fEnd = fuelData[fuelData.length - 1].data;
+                            const diff = fEnd - fStart;
+                            if (diff >= 0) {
+                                driverFuelLiters += diff;
+                                validFuelTripsCount++;
+                            }
+                        }
+                    });
+
+                    const totalDist = driverGroup.totalDistanceKm;
+                    const avg = totalDist > 0 ? (driverFuelLiters / totalDist) * 100.0 : 0;
+
+                    currentReportData.push({
+                        id: driverGroup.id,
+                        name: driverGroup.name,
+                        serialNumber: "N/A",
+                        distanceKm: parseFloat(totalDist.toFixed(2)),
+                        fuelLiters: parseFloat(driverFuelLiters.toFixed(2)),
+                        avgConsumption: parseFloat(avg.toFixed(2)),
+                        hasCanBus: validFuelTripsCount > 0,
+                        tripsCount: driverGroup.trips.length
+                    });
+                });
+
+                renderTable("User");
+                renderChart();
+            }, showError);
+
+        }, showError);
     }
 
-    // ─── GRÁFICOS Y EXPORTACIÓN ───────────────────────────────────────────────
-    function renderBarChart(labels, data, title) {
-        chartWrap.style.display = 'block';
-        const ctx = document.getElementById('fuelChart').getContext('2d');
-        if (chartInstance) chartInstance.destroy();
+    // =========================================================================
+    // 5. RENDERIZADO DE RESULTADOS (TABLA & GRÁFICO)
+    // =========================================================================
+
+    function renderTable(mode) {
+        const threshold = parseFloat(document.getElementById("thresholdLimit").value) || 30.0;
+        const panel = document.getElementById("results-panel");
+        document.getElementById("btn-export-excel").style.display = "inline-block";
+
+        if (currentReportData.length === 0) {
+            renderEmptyResults("No se obtuvieron registros.");
+            return;
+        }
+
+        let html = `
+            <table class="fuel-table">
+                <thead>
+                    <tr>
+                        <th>${mode === "Device" ? "Vehículo / Activo" : "Conductor"}</th>
+                        ${mode === "Device" ? "<th>Nº Serie / VIN</th>" : "<th>Viajes Analizados</th>"}
+                        <th style="text-align: right;">Distancia (km)</th>
+                        <th style="text-align: right;">Combustible (L)</th>
+                        <th style="text-align: right;">Consumo Medio (L/100km)</th>
+                        <th style="text-align: center;">Estado CAN / Alerta</th>
+                    </tr>
+                </thead>
+                <tbody>
+        `;
+
+        currentReportData.forEach(row => {
+            const isAlert = row.avgConsumption > threshold;
+            const rowStyle = isAlert ? 'style="background-color: #fee2e2;"' : '';
+            const textAlertStyle = isAlert ? 'color: #b91c1c; font-weight: 700;' : '';
+
+            let statusBadge = '';
+            if (!row.hasCanBus) {
+                statusBadge = '<span style="color: #d97706; font-weight: 600;">Sin Datos CAN</span>';
+            } else if (isAlert) {
+                statusBadge = `<span style="color: #b91c1c; font-weight: 700;"> Excede Umbral (&gt;${threshold})</span>`;
+            } else {
+                statusBadge = '<span style="color: #16a34a; font-weight: 600;"> Normal</span>';
+            }
+
+            html += `
+                <tr ${rowStyle}>
+                    <td style="font-weight: 600;">${escapeHtml(row.name)}</td>
+                    <td>${mode === "Device" ? escapeHtml(row.serialNumber) : row.tripsCount}</td>
+                    <td style="text-align: right;">${row.distanceKm.toLocaleString('es-ES')}</td>
+                    <td style="text-align: right;">${row.fuelLiters.toLocaleString('es-ES')}</td>
+                    <td style="text-align: right; ${textAlertStyle}">${row.avgConsumption.toLocaleString('es-ES')}</td>
+                    <td style="text-align: center;">${statusBadge}</td>
+                </tr>
+            `;
+        });
+
+        html += `</tbody></table>`;
+        panel.innerHTML = html;
+    }
+
+    function renderChart() {
+        const chartWrapper = document.getElementById("chartWrapper");
+        const ctx = document.getElementById("fuelChart").getContext("2d");
+        const threshold = parseFloat(document.getElementById("thresholdLimit").value) || 30.0;
+
+        chartWrapper.style.display = "block";
+
+        if (chartInstance) {
+            chartInstance.destroy();
+        }
+
+        const labels = currentReportData.map(d => d.name);
+        const dataValues = currentReportData.map(d => d.avgConsumption);
+        const backgroundColors = dataValues.map(v => v > threshold ? 'rgba(220, 38, 38, 0.75)' : 'rgba(43, 83, 125, 0.75)');
+        const borderColors = dataValues.map(v => v > threshold ? '#b91c1c' : '#1f3e5e');
 
         chartInstance = new Chart(ctx, {
             type: 'bar',
             data: {
                 labels: labels,
-                datasets: [{ label: title, data: data, backgroundColor: '#2b537d', borderRadius: 4 }]
+                datasets: [{
+                    label: 'Consumo Medio (L/100km)',
+                    data: dataValues,
+                    backgroundColor: backgroundColors,
+                    borderColor: borderColors,
+                    borderWidth: 1
+                }]
             },
-            options: { responsive: true, maintainAspectRatio: false }
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: true, position: 'top' },
+                    tooltip: {
+                        callbacks: {
+                            label: function (context) {
+                                return ` Consumo: ${context.parsed.y} L/100km`;
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        title: { display: true, text: 'L/100km' }
+                    },
+                    x: {
+                        ticks: { maxRotation: 45, minRotation: 0 }
+                    }
+                }
+            }
         });
     }
 
-    function renderLineChart(fuelData, title) {
-        chartWrap.style.display = 'block';
-        const ctx = document.getElementById('fuelChart').getContext('2d');
-        if (chartInstance) chartInstance.destroy();
-
-        const dataset = fuelData.map(d => ({ x: new Date(d.dateTime), y: d.data }));
-
-        chartInstance = new Chart(ctx, {
-            type: 'line',
-            data: {
-                datasets: [{ label: title, data: dataset, borderColor: '#2b537d', backgroundColor: 'rgba(43, 83, 125, 0.08)', fill: true }]
-            },
-            options: { responsive: true, maintainAspectRatio: false, scales: { x: { type: 'time' } } }
-        });
-    }
+    // =========================================================================
+    // 6. EXPORTACIÓN CSV CON COMPATIBILIDAD EXCEL (UTF-8 BOM)
+    // =========================================================================
 
     function exportToCSV() {
-        if (!reportDataForExport.length) return;
-        const headers = Object.keys(reportDataForExport[0]);
-        const csvRows = [headers.join(';')];
+        if (currentReportData.length === 0) return;
 
-        for (const row of reportDataForExport) {
-            csvRows.push(headers.map(h => row[h]).join(';'));
-        }
+        const mode = document.querySelector('input[name="searchMode"]:checked').value;
+        const threshold = parseFloat(document.getElementById("thresholdLimit").value) || 30.0;
 
-        const blob = new Blob(["\uFEFF" + csvRows.join('\n')], { type: 'text/csv;charset=utf-8;' });
+        let csvContent = "\uFEFF"; // BOM para correcta codificación de acentos en Excel
+        csvContent += mode === "Device" 
+            ? "Vehículo;Nº Serie;Distancia (km);Combustible (L);Consumo Medio (L/100km);Estado\n"
+            : "Conductor;Viajes Analizados;Distancia (km);Combustible (L);Consumo Medio (L/100km);Estado\n";
+
+        currentReportData.forEach(row => {
+            const status = !row.hasCanBus ? "Sin Datos CAN" : (row.avgConsumption > threshold ? "Excede Umbral" : "Normal");
+            const col2 = mode === "Device" ? row.serialNumber : row.tripsCount;
+            
+            // Reemplazo de puntos decimales por comas para formateo regional en español
+            const distStr = row.distanceKm.toString().replace('.', ',');
+            const fuelStr = row.fuelLiters.toString().replace('.', ',');
+            const avgStr = row.avgConsumption.toString().replace('.', ',');
+
+            csvContent += `"${row.name.replace(/"/g, '""')}";"${col2}";${distStr};${fuelStr};${avgStr};"${status}"\n`;
+        });
+
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
         const url = URL.createObjectURL(blob);
         const link = document.createElement("a");
-        link.href = url;
-        link.download = `Informe_Consumo_${dateFrom.value}_al_${dateTo.value}.csv`;
+        link.setAttribute("href", url);
+        link.setAttribute("download", `Informe_Consumo_${mode}_${new Date().toISOString().split('T')[0]}.csv`);
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
     }
 
-    return {
-        initialize: function (api, state, callback) {
-            currentApi = api;
+    // =========================================================================
+    // 7. UTILIDADES Y MANEJO DE ERRORES
+    // =========================================================================
 
-            const today = new Date();
-            const lastWeek = new Date(today.getTime() - (7 * 24 * 60 * 60 * 1000));
-            dateFrom.value = lastWeek.toISOString().split('T')[0];
-            dateTo.value = today.toISOString().split('T')[0];
+    function showLoading() {
+        document.getElementById("btn-export-excel").style.display = "none";
+        document.getElementById("chartWrapper").style.display = "none";
+        document.getElementById("results-panel").innerHTML = `
+            <div style="padding: 40px; text-align: center; color: #2b537d; font-weight: 600;">
+                <svg width="32" height="32" viewBox="0 0 24 24" style="animation: spin 1s linear infinite;" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="10" stroke-opacity="0.25"></circle>
+                    <path d="M12 2 a10 10 0 0 1 10 10" stroke-linecap="round"></path>
+                </svg>
+                <style>@keyframes spin { 100% { transform: rotate(360deg); } }</style>
+                <p style="margin-top: 12px; font-size: 14px;">Consultando telemetría y procesando datos CAN-bus...</p>
+            </div>
+        `;
+    }
 
-            modeRadios.forEach(r => r.addEventListener('change', loadEntityList));
-            btnFetch.addEventListener('click', loadReport);
-            btnExport.addEventListener('click', exportToCSV);
+    function renderEmptyResults(msg) {
+        document.getElementById("results-panel").innerHTML = `
+            <div style="padding: 30px; text-align: center; color: #5a6a75; background: #ffffff; border: 1px solid #dce2e6; border-radius: 6px;">
+                <p style="margin: 0; font-size: 14px; font-weight: 500;">${escapeHtml(msg)}</p>
+            </div>
+        `;
+        document.getElementById("chartWrapper").style.display = "none";
+        document.getElementById("btn-export-excel").style.display = "none";
+    }
 
-            callback();
-        },
-        focus: function (api, state) {
-            loadEntityList();
-        },
-        blur: function () { }
-    };
+    function showError(error) {
+        console.error("Geotab Fuel Monitor Error:", error);
+        document.getElementById("results-panel").innerHTML = `
+            <div style="padding: 16px; background-color: #fef2f2; border: 1px solid #fecaca; border-radius: 6px; color: #991b1b; font-size: 13px;">
+                <strong>Error al consultar la API de Geotab:</strong> ${escapeHtml(error.message || JSON.stringify(error))}
+            </div>
+        `;
+    }
+
+    function escapeHtml(str) {
+        if (!str) return '';
+        return String(str)
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#039;");
+    }
 };
